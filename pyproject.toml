@@ -30,7 +30,7 @@ classifiers = [
 ]
 dependencies = [
     "pillow>=10.0,<12",
-    "openai>=1.0,<3",
+    "openai>=3.20.0,<4",
 ]
 
 [project.urls]
