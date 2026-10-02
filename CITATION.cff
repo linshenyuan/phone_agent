@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "如果本项目对你的研究或工作有帮助，请按以下格式引用。"
+title: "phone-agent"
+abstract: >-
+  用本地视觉模型 + ADB 自主操控 Android 手机真机的 GUI Agent。
+  基于 GELab-Zero 开发（复用其视觉模型、yadb 工具与动作接口约定）。
+type: software
+authors:
+  - alias: linshenyuan
+    # 如需补全姓名/邮箱/ORCID，在此填写
+repository-code: "https://github.com/linshenyuan/phone_agent"
+url: "https://github.com/linshenyuan/phone_agent"
+license: MIT
+license-url: "https://github.com/linshenyuan/phone_agent/blob/main/LICENSE"
+version: "0.1.0"
+date-released: "2026-10-02"
+keywords:
+  - android
+  - adb
+  - gui-agent
+  - automation
+  - vision-language-model
+references:
+  - type: software
+    title: "GELab-Zero"
+    # ★ reference 的必需字段是 authors/title/type（官方 1.2.0 schema）
+    authors:
+      - name: "stepfun-ai"
+    abstract: "本项目的上游参考项目（视觉模型与 yadb 的来源）"
+    repository-code: "https://github.com/stepfun-ai/gelab-zero"
+    license: MIT

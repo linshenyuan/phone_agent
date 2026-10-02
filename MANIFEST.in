@@ -1,0 +1,10 @@
+# sdist 里要包含的非代码文件
+# ★ 为什么需要（2026-10-02 审计）：bin/ 在 src/ 之外，setuptools 默认不会打包它，
+#   导致 pip install . 后找不到 yadb，且 LGPL-3.0 要求的许可证副本没随分发包出去。
+include bin/yadb
+include LICENSES/*.txt
+include THIRD_PARTY_NOTICES.md
+include LICENSE README.md CHANGELOG.md CONTRIBUTING.md SKILL.md
+include requirements.txt
+include .gitattributes
+recursive-include src/phone_agent *.py
