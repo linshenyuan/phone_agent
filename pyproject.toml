@@ -1,6 +1,6 @@
 [build-system]
 # ★ 必须 >=77：license = "MIT"（SPDX）与 license-files 要 setuptools 77+
-requires = ["setuptools>=77", "wheel"]
+requires = ["setuptools>=84.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
