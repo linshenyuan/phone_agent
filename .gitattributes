@@ -1,0 +1,28 @@
+# ★ git 的属性规则：后面的覆盖前面的 —— 所以通用规则在前、特殊规则在后。
+#   （2026-10-02 审计：原先 binary 写在最前、* text=auto 在后，
+#    结果 `git check-attr bin/yadb` 得到 text: auto，binary 护栏等于没生效。）
+
+# ---- 通用规则 ----
+* text=auto eol=lf
+
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.cff text eol=lf
+*.in text eol=lf
+
+# ---- 特殊规则（必须放在后面才能覆盖上面的）----
+
+# bin/yadb 是二进制（APK），绝不能被 CRLF 转换，否则文件损坏
+bin/yadb binary
+*.png binary
+*.jpg binary
+*.gguf binary
+*.apk binary
+
+# Windows 批处理需要 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

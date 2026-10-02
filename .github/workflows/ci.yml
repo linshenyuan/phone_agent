@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 语法检查
+        run: python -m compileall -q src/ run.py
+
+      - name: 冒烟测试（不需要手机与模型服务）
+        run: |
+          python -c "
+          import sys; sys.path.insert(0, 'src')
+          from phone_agent import tasks, vision
+          # 纯函数：纯打开类任务的判定
+          assert tasks._is_pure_open_task('打开设置', 'com.android.settings') is True
+          assert tasks._is_pure_open_task('打开微信给张三发消息', 'com.tencent.mm') is False
+          # 纯函数：坐标解析
+          assert vision.parse_point([500, 800]) == (500.0, 800.0)
+          print('冒烟测试通过')
+          "
+
+      - name: 安装后验证（确保装完真的能找到 yadb）
+        run: |
+          pip install .
+          python -c "
+          from phone_agent import apps, config
+          y = apps.find_yadb()
+          assert y is not None, f'装完找不到 yadb；候选={config.YADB_CANDIDATES}'
+          print('find_yadb ->', y)
+          print('LOG_DIR   ->', config.LOG_DIR)
+          print('TMP_DIR   ->', config.TMP_DIR)
+          assert 'site-packages' not in str(config.LOG_DIR), '日志目录不该落在 site-packages'
+          print('安装态验证通过')
+          "
+
+      - name: 打包内容验证（确保 yadb 与 LGPL 文本随包分发）
+        run: |
+          pip install build
+          python -m build --wheel
+          python -c "
+          import glob, zipfile
+          whl = glob.glob('dist/*.whl')[0]
+          names = zipfile.ZipFile(whl).namelist()
+          assert any('yadb' in n for n in names), 'bin/yadb 没进 wheel'
+          assert any('LGPL' in n for n in names), 'LGPL 文本没进 wheel'
+          assert any('THIRD_PARTY' in n for n in names), 'THIRD_PARTY_NOTICES 没进 wheel'
+          print('打包内容正确')
+          "

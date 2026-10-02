@@ -1,0 +1,66 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请尽量填全，尤其是**日志**和**完成截图** —— 这个项目判断问题主要靠这两样。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 期望的行为 vs 实际的行为
+    validations:
+      required: true
+
+  - type: input
+    id: task
+    attributes:
+      label: 完整的 --task 与参数
+      placeholder: 'python run.py --task "打开设置" --quiet'
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: 日志（log/ 下最新那份的相关部分）
+      description: 用 tail -30 截取，别贴全文
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: 完成截图（tmp/ 下的 PNG）
+      description: 如果是「假成功」或「卡死」，这张图是关键证据 —— 可直接拖进来
+    validations:
+      required: false
+
+  - type: input
+    id: device
+    attributes:
+      label: 手机型号 + Android 版本
+      placeholder: "vivo X100 / Android 14"
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: 模型服务
+      description: 哪个模型、怎么起的、什么参数
+      placeholder: "GELab-Zero-4B-Q6_K via llama.cpp, -ngl 99 -c 16384"
+    validations:
+      required: true
+
+  - type: input
+    id: exit-code
+    attributes:
+      label: 退出码
+      description: "0=完成 1=出错 2=卡死 3=完成但可疑 4=需要人工输入"
+    validations:
+      required: true

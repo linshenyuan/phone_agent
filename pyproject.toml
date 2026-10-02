@@ -1,0 +1,80 @@
+[build-system]
+# ★ 必须 >=77：license = "MIT"（SPDX）与 license-files 要 setuptools 77+
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phone-agent"
+version = "0.1.0"
+description = "Vision-model-driven Android GUI agent over ADB (based on GELab-Zero)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"                                  # PEP 639 写法（旧的 {text = "MIT"} 已弃用）
+license-files = ["LICENSE", "LICENSES/*.txt"]    # 把 LGPL/GPL 文本纳入元数据
+authors = [
+    { name = "linshenyuan" },
+]
+keywords = ["android", "adb", "gui-agent", "automation", "llm", "vision-language-model", "yadb"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "pillow>=10.0,<12",
+    "openai>=1.0,<3",
+]
+
+[project.urls]
+Repository = "https://github.com/linshenyuan/phone_agent"
+Issues = "https://github.com/linshenyuan/phone_agent/issues"
+Upstream = "https://github.com/stepfun-ai/gelab-zero"
+
+[project.scripts]
+phone-agent = "phone_agent.phone_agent:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ★ 关键（2026-10-02 审计）：bin/ 与 LICENSES/ 在 src/ 之外，
+#   必须显式声明才会进 wheel，否则 pip install . 后找不到 yadb、
+#   且 LGPL-3.0 要求的许可证副本不会随分发包出去。
+[tool.setuptools.data-files]
+"bin" = ["bin/yadb"]
+"LICENSES" = ["LICENSES/LGPL-3.0.txt", "LICENSES/GPL-3.0.txt"]
+"." = ["THIRD_PARTY_NOTICES.md", "LICENSE"]
+
+# ══════════════════════════════════════════════════════
+# 代码风格工具（可选，未强制）
+# 用法：pip install ruff && ruff check . && ruff format .
+# ══════════════════════════════════════════════════════
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["bin", "LICENSES"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",   # 行长交给 formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"run.py" = ["E402"]        # sys.path 调整后再 import，必须如此
+"src/phone_agent/deps.py" = ["F401"]   # 故意 re-export
+"src/phone_agent/__init__.py" = ["F401"]
+
+[tool.ruff.format]
+quote-style = "double"
