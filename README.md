@@ -5,12 +5,19 @@
 > 复用了它的**视觉模型**、**`yadb` 工具**与**动作接口约定**；源代码为独立实现。
 > 详细的依赖清单与审计依据见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-用**本地视觉模型 + ADB** 自主操控 Android 手机真机。
+用**视觉模型 + ADB** 自主操控 Android 手机真机。
 给它一句自然语言，它自己看屏幕、点按钮、打字。
 
 ```bash
 python run.py --task "打开微信给张三发消息说我晚点到"
 ```
+
+> **本skill适用于本地模型与云端模型。**
+> 只要提供 OpenAI 兼容接口（`--api-base` / `--api-key` / `--model`），
+> 本地 `llama.cpp` 与云端 API 都能驱动本项目。
+>
+> **本文档以本地模型（llama.cpp + GELab-Zero-4B）为参考配置。**
+> 换用云端模型时，除接口参数外，**提示词可能也需要相应调整** —— 见「已知限制」。
 
 ## 工作原理
 
@@ -49,10 +56,17 @@ python run.py --task "打开微信给张三发消息说我晚点到"
    ```bash
    adb devices        # 状态必须是 device
    ```
-3. **视觉模型服务**在 `http://127.0.0.1:8080/v1` 运行（OpenAI 兼容接口）
-   ```bash
-   curl -s http://127.0.0.1:8080/v1/models
-   ```
+3. **一个支持视觉的模型服务**（OpenAI 兼容接口）—— **本地或云端均可**：
+
+   | 部署方式 | `--api-base` | `--api-key` |
+   |---|---|---|
+   | **本地**（llama.cpp / LM Studio / Ollama） | `http://127.0.0.1:8080/v1` | 任意占位值（如 `local`） |
+   | **云端**（OpenAI / DeepSeek / 通义千问 等） | 服务商给的地址 | 你的真实 API Key |
+
+   > ⚠️ 用云端模型时，**提示词可能需要调整**才能让模型按本项目要求的动作格式输出
+   > —— 见「已知限制」。
+
+   **本文档以下以本地部署为参考。**
 
 ## 安装
 
@@ -74,6 +88,8 @@ phone-agent --task "打开设置"
 
 ## 用法
 
+### 本地模型（本文档的参考配置）
+
 ```bash
 # ① 直接跑（推荐）
 python run.py --task "打开设置"
@@ -84,6 +100,28 @@ cd src && python -m phone_agent --task "打开设置"
 # ③ 装完之后
 phone-agent --task "打开设置"
 ```
+
+### 云端模型
+
+只需换接口参数 —— 其余用法完全相同：
+
+```bash
+# 以 OpenAI 为例
+python run.py --task "打开设置" \
+  --api-base https://api.openai.com/v1 \
+  --api-key sk-xxxxxxxxxxxxxxxx \
+  --model gpt-4o
+
+# 以 DeepSeek 为例（注意：需选支持视觉的模型）
+python run.py --task "打开设置" \
+  --api-base https://api.deepseek.com/v1 \
+  --api-key sk-xxxxxxxxxxxxxxxx \
+  --model deepseek-vl
+```
+
+> ⚠️ **云端模型不保证开箱可用。** 本项目的提示词与动作格式是为
+> GELab-Zero-4B 的训练数据写的，换成通用对话模型后可能不按格式输出。
+> 见「已知限制」里的说明。
 
 **给 AI agent 调用时**，见 [SKILL.md](SKILL.md)
 
@@ -167,6 +205,7 @@ my_project/
 | **密码框需人工** | 检测到密码框会停下并返回退出码 4 —— 密码不该由脚本代输，且 Android 对密码框的 `text` 恒返回空串，回读验证必然失败 |
 | **自绘桌面读不到** | 部分 ROM 的桌面是自绘 View，`uiautomator dump` 读不到图标（已用 `monkey` 绕开） |
 | **小模型能力有限** | 对界面语义理解弱，复杂任务可能需多次尝试 |
+| **换模型需重新验证提示词** | `vision.PROMPT_TEMPLATE` 里的坐标格式（0-1000 归一化）与动作名（`CLICK`/`SLIDE`/`TYPE`…）**是绑在 GELab-Zero-4B 训练数据上的**。换成本地其他模型或云端模型后，模型可能不按此格式输出 —— 需先改提示词并实测 |
 | **纯打开任务也需模型服务** | `main()` 里的服务探测早于短路判断 |
 | **安全输入场景会失效** | 密码/验证码框会强制切系统安全键盘，yadb 也注入不进去 |
 
