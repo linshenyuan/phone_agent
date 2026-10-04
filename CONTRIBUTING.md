@@ -80,6 +80,7 @@
 
 | 提示词里写的 | 代码里的兜底 |
 |---|---|
+| 「坐标必须是 0-1000」 | `_checked_point()` 越界超 ±50 即判非法 → 重试重问（不再硬夹回屏幕） |
 | 「SLIDE 最多用 1 次」 | `MAX_SLIDE_TOTAL = 3` |
 | 「不要重复输入」 | `MAX_CONSECUTIVE_TYPE = 1`（清零判据：点到输入框上；判不清则停下报告） |
 | 「任务达成后立即 COMPLETE」 | `_is_pure_open_task()` 短路 |
