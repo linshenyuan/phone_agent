@@ -8,7 +8,7 @@ from typing import Any
 
 from .adb import AdbError, adb, keyevent, swipe, tap
 from .apps import current_package, input_text, launch_app
-from .config import TMP_DIR, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, EXIT_NEED_HUMAN, MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, STUCK_POSITION_TOLERANCE_PX, STUCK_REPEAT_THRESHOLD, STUCK_SLIDE_REPEAT_THRESHOLD, STUCK_TYPE_REPEAT_THRESHOLD, STUCK_WINDOW, TYPE_RETRY, TYPE_VERIFY_DELAY
+from .config import TMP_DIR, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, EXIT_NEED_HUMAN, MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, STUCK_POSITION_TOLERANCE_PX, STUCK_REPEAT_THRESHOLD, STUCK_SLIDE_REPEAT_THRESHOLD, STUCK_TYPE_REPEAT_THRESHOLD, STUCK_WINDOW, TYPE_RETRY, TYPE_VERIFY_DELAY, WAIT_SECONDS_DEFAULT, WAIT_SECONDS_MAX
 from .output import info, prune_tmp
 from .ui import focus_editable_box, read_focused_text
 from .vision import parse_point
@@ -377,9 +377,10 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
         return ExecResult(True, "回桌面")
 
     if name == "WAIT":
-        seconds = float(action.get("seconds", 3))
+        seconds = float(action.get("seconds", WAIT_SECONDS_DEFAULT))
         if not dry_run:
-            time.sleep(min(seconds, 10))
+            # 保险：正常已在 normalize_action 校验过 0~WAIT_SECONDS_MAX，这里再夹一次防意外
+            time.sleep(max(0.0, min(seconds, WAIT_SECONDS_MAX)))
         return ExecResult(True, f"等待 {seconds:g} 秒")
 
     if name == "OPEN":

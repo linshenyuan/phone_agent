@@ -7,7 +7,7 @@ import io
 import json
 from typing import Any
 
-from .config import COORD_RANGE_TOLERANCE, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, MODEL_RETRY, MODEL_RETRY_BACKOFF
+from .config import COORD_RANGE_TOLERANCE, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, MODEL_RETRY, MODEL_RETRY_BACKOFF, WAIT_SECONDS_DEFAULT, WAIT_SECONDS_MAX
 from .output import info
 from .deps import Image, OpenAI
 import re
@@ -286,7 +286,22 @@ def normalize_action(obj: dict[str, Any]) -> dict[str, Any]:
             raise InvalidActionError("TYPE 动作的 value 为空 —— 模型没给出要输入的文字")
 
     elif name == "WAIT":
-        out["seconds"] = float(obj.get("seconds") or obj.get("duration") or 3)
+        # ★ 秒数做范围校验（2026-10-04 加）：负数会让 time.sleep 抛错、
+        #   过大没有意义，一律判非法交给重试，而不是悄悄夹到 10。
+        raw = obj.get("seconds")
+        if raw is None:
+            raw = obj.get("duration")
+        if raw is None:
+            raw = WAIT_SECONDS_DEFAULT
+        try:
+            secs = float(raw)
+        except (TypeError, ValueError):
+            raise InvalidActionError(f"WAIT 秒数无法解析：{raw!r}")
+        if not (0 <= secs <= WAIT_SECONDS_MAX):
+            raise InvalidActionError(
+                f"WAIT 秒数非法：{secs:g} —— 应在 0-{WAIT_SECONDS_MAX} 秒之间"
+                f"（负数会让 sleep 抛错、过大无意义），已拒绝执行，请重新给出")
+        out["seconds"] = secs
 
     elif name in ("OPEN", "LAUNCH", "START_APP"):
         # 打开应用：交给 adb 直接启动，不走桌面图标识别（vivo 桌面读不到元素）
