@@ -84,3 +84,4 @@
 | 「不要重复输入」 | `MAX_CONSECUTIVE_TYPE = 1` |
 | 「任务达成后立即 COMPLETE」 | `_is_pure_open_task()` 短路 |
 | 「密码框留给人工」 | `focus_editable_box()` 返回 `is_pwd` → 退出码 4 |
+| 「先 CLICK 输入框再 TYPE」 | 多框无法确定目标时 `focus_editable_box()` 返回 `ambiguous` → 停下询问 |
