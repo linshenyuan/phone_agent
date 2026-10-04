@@ -12,8 +12,8 @@ from .apps import current_package, detect_app_in_task, ensure_yadb, launch_app, 
 from .config import TMP_DIR, EXIT_NEED_HUMAN, MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL
 from .output import info, prune_tmp
 from .tasks import _is_pure_open_task, _is_trivial_task, _looks_like_text_task
-from .ui import visible_texts
-from .vision import ask_model, resize_for_model
+from .ui import point_hits_editable, visible_texts
+from .vision import ask_model, parse_point, resize_for_model
 from .deps import OpenAI
 
 
@@ -104,9 +104,27 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
 
         info(f"模型决策：{json.dumps(action, ensure_ascii=False)}")
 
+        # ★ 连续 TYPE 保护的新判据（2026-10-04 改）：只有「上一步真的点在输入框上」
+        #   才清零计数。判断方式 = 读界面树看这个坐标有没有压住 EditText，
+        #   取代旧的「看 y 是否在屏幕下方」猜测（换机型 / 横屏 / 浮窗会猜错，
+        #   底部普通按钮也会被误当成重新聚焦输入区而绕过保护）。
+        #   仅当「已有计数待清」时才去读界面，平时不读 —— 避免每步多花 ~1.7s。
+        click_on_input = None
+        click_checked = False
+        if (str(action.get("action_type", "")).upper() in ("CLICK", "LONGPRESS")
+                and stuck.consecutive_type > 0 and not dry_run
+                and action.get("point") is not None):
+            click_checked = True
+            nx, ny = parse_point(action["point"])
+            real_pt = (int(nx / 1000 * real_img.width),
+                       int(ny / 1000 * real_img.height))
+            click_on_input = point_hits_editable(device, real_pt)
+
         # 卡死检测：命中就立刻收工，不再把剩下的步数烧光。
         # 因为 agent 一旦卡住，后续动作全是重复的，继续跑只会污染现场。
-        stuck_reason = stuck.update(action)
+        stuck_reason = stuck.update(action,
+                                    click_on_input=click_on_input,
+                                    click_checked=click_checked)
         if stuck_reason:
             print(f"\n{'=' * 56}")
             print(f"[卡死] 第 {step} 步判定为原地打转，提前终止")
@@ -118,6 +136,21 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
         #   * 连续 TYPE —— 模型点不中发送按钮时会反复追加文字，退化成 200 字乱码
         #   * 滑动超限 —— 目标明明已经可见，它还在无意义地滑（2026-10-01 加）
         if stuck.should_block(action):
+            # ★ 判断不出输入框、且模型仍要「连打第二次」-> 停下报告，交给人工（2026-10-04 加）
+            #   为什么不再默默跳过：判断不出通常是界面读不透（Flutter/WebView），
+            #   这时小模型极易反复 TYPE 把文字叠成乱码，停下来让人接手更安全。
+            if stuck.escalate_stop:
+                reason = ("模型想连续输入第二次，但当前界面读不透"
+                          "（看不到输入框，多为 Flutter/WebView 界面）—— "
+                          "小模型在这里无法可靠判断，请人工接手")
+                report_need_human(
+                    device, real_img, step, reason,
+                    headline="[模型无法判断输入框，请人工接手]",
+                    conclusion=(
+                        f"[结论] 任务【未完成】—— 退出码 {EXIT_NEED_HUMAN} = "
+                        f"模型无法判断输入框，**不是脚本失败**\n"
+                        f"       脚本已停在原处，可人工完成后重新发起任务。"))
+                return EXIT_NEED_HUMAN
             if action.get("action_type") == "SLIDE":
                 note = (f"[已拦截] 滑动次数已用尽（{stuck.slide_total} 次，上限 "
                         f"{MAX_SLIDE_TOTAL}），这一步没有执行。"

@@ -8,7 +8,7 @@ from typing import Any
 
 from .adb import AdbError, adb, keyevent, swipe, tap
 from .apps import current_package, input_text, launch_app
-from .config import TMP_DIR, BOTTOM_AREA_Y_MIN, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, EXIT_NEED_HUMAN, MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, STUCK_POSITION_TOLERANCE_PX, STUCK_REPEAT_THRESHOLD, STUCK_SLIDE_REPEAT_THRESHOLD, STUCK_TYPE_REPEAT_THRESHOLD, STUCK_WINDOW, TYPE_RETRY, TYPE_VERIFY_DELAY
+from .config import TMP_DIR, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, EXIT_NEED_HUMAN, MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, STUCK_POSITION_TOLERANCE_PX, STUCK_REPEAT_THRESHOLD, STUCK_SLIDE_REPEAT_THRESHOLD, STUCK_TYPE_REPEAT_THRESHOLD, STUCK_WINDOW, TYPE_RETRY, TYPE_VERIFY_DELAY
 from .output import info, prune_tmp
 from .ui import focus_editable_box, read_focused_text
 from .vision import parse_point
@@ -79,6 +79,11 @@ class StuckDetector:
         self._blocked_type = False
         # 最近一次点击对「连续 TYPE 计数」的影响，仅用于日志排查
         self.last_reset_note = ""
+        # ★ 最近一次点击「是不是输入框」判断不出来（界面读不透）—— 见 update()
+        self._unknown_click = False
+        # ★ should_block() 判定要拦 TYPE、且原因正是上面这个「看不清」时置 True，
+        #   让调用方**停下并报告**，而不是默默跳过（2026-10-04 加）
+        self.escalate_stop = False
 
     # -- 判定辅助 --------------------------------------------------
 
@@ -102,10 +107,16 @@ class StuckDetector:
 
     # -- 对外接口 --------------------------------------------------
 
-    def update(self, action: dict[str, Any]) -> str | None:
+    def update(self, action: dict[str, Any],
+               click_on_input: bool | None = None,
+               click_checked: bool = False) -> str | None:
         """
         喂入一个动作，返回卡死原因；没卡死返回 None。
 
+        :param click_on_input: CLICK/LONGPRESS 时，这次点击是否压在输入框上
+                               （True / False / None=看不清），由调用方读界面树判断。
+        :param click_checked:  调用方这次**有没有去判断**（False 表示没查，
+                               通常因为当前没有待清的连续 TYPE 计数）。
         :return: 人类可读的卡死描述，命中后调用方应立即终止任务
         """
         name = str(action.get("action_type", "")).upper()
@@ -114,20 +125,32 @@ class StuckDetector:
             point = action.get("point")
             if point is not None:
                 p = parse_point(point)
-                # 点在屏幕下方（输入框 / 发送按钮那一带）-> 视为「重新聚焦输入区」，
-                # 连续 TYPE 计数清零，允许模型输入下一句。
-                # 注意这只是代码内部的重置逻辑，模型并不知道这条线在哪。
-                if p[1] >= BOTTOM_AREA_Y_MIN:
-                    self.consecutive_type = 0
-                    self._blocked_type = False
-                    # ★ 埋点（2026-09-29 加）：上一轮真机日志里「第 5 步 TYPE 被拦」，
-                    #   但同一动作序列单测却不拦。要能一眼看出是不是这条清零逻辑
-                    #   因为坐标差异没能触发 —— 所以把判定过程记下来。
-                    self.last_reset_note = (f"CLICK y={p[1]:.0f} >= {BOTTOM_AREA_Y_MIN}"
-                                            f" -> 计数清零")
+                # ★ 清零判据（2026-10-04 改）：只有「这次点击真的压在输入框上」才清零，
+                #   允许模型输入下一句。
+                #   旧版看「y 是否在屏幕下方」，换机型 / 横屏 / 浮窗会猜错，
+                #   底部普通按钮也会被误当成「重新聚焦输入区」从而绕过连续 TYPE 保护。
+                if click_checked:
+                    if click_on_input is True:
+                        self.consecutive_type = 0
+                        self._blocked_type = False
+                        self._unknown_click = False
+                        self.last_reset_note = (
+                            f"CLICK ({p[0]:.0f},{p[1]:.0f}) 命中输入框 -> 计数清零")
+                    elif click_on_input is False:
+                        self._unknown_click = False
+                        self.last_reset_note = (
+                            f"CLICK ({p[0]:.0f},{p[1]:.0f}) 未命中输入框 -> 计数未清零")
+                    else:
+                        # 看不清是不是输入框：不猜、不清零。
+                        # 若模型随后仍要「连打第二次」，should_block 会升级为「停下报告」。
+                        self._unknown_click = True
+                        self.last_reset_note = (
+                            f"CLICK ({p[0]:.0f},{p[1]:.0f}) 输入框判断不明 -> 计数未清零")
                 else:
-                    self.last_reset_note = (f"CLICK y={p[1]:.0f} < {BOTTOM_AREA_Y_MIN}"
-                                            f" -> 计数**未**清零")
+                    # 没去查（当时没有待清的计数）：清掉过期的「看不清」标记
+                    self._unknown_click = False
+                    self.last_reset_note = (
+                        f"CLICK ({p[0]:.0f},{p[1]:.0f}) 未检查（无待清计数）")
 
                 self.clicks.append(p)
                 self.clicks = self.clicks[-STUCK_WINDOW:]
@@ -206,8 +229,14 @@ class StuckDetector:
           本步是第 2 次 -> 2 > 1 真 -> 拦截 ✅
         """
         name = str(action.get("action_type", "")).upper()
+        self.escalate_stop = False
         if name == "TYPE":
-            return self.consecutive_type > MAX_CONSECUTIVE_TYPE
+            block = self.consecutive_type > MAX_CONSECUTIVE_TYPE
+            # ★ 若这次该拦、且「上一次点击是不是输入框」判断不出来 —— 升级为「停下报告」。
+            #   为什么：判断不出来通常是界面读不透（Flutter/WebView），此时小模型极易
+            #   反复 TYPE 把文字叠成乱码；与其默默跳过，不如让用户接手（2026-10-04）。
+            self.escalate_stop = block and self._unknown_click
+            return block
         if name == "SLIDE":
             # ★ 滑动总次数超限（2026-10-01 加）：拦掉这一步，逼模型改用别的手段。
             #   提示词说了「最多 1 次」它不听，只能代码兜底。
@@ -371,17 +400,25 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
 
 
 def report_need_human(device: str | None, img: Image.Image, step: int,
-                      reason: str) -> None:
+                      reason: str,
+                      headline: str | None = None,
+                      conclusion: str | None = None) -> None:
     """
     遇到需要人工介入的场景时，把话说清楚并留证据（2026-10-01 加）。
+
+    :param headline:   抬头行；不传则用「需要人工输入（密码）」的默认措辞
+    :param conclusion: 结尾结论；不传则用「需要人工输入（密码）」的默认措辞
+                       （2026-10-04 加：让「界面读不透」这类场景也能复用本函数）
 
     ★ 为什么末尾必须有一行无歧义的结论（2026-09-30 实测踩坑）：
       调用方（尤其是 LLM）往往**只读尾部**。光在中间写「已停止」不够，
       它照样会照着退出码自行解释，甚至编一个与事实无关的原因回给用户。
       所以结尾三件事都要写：是什么、不是什么、不许编什么。
     """
+    if headline is None:
+        headline = f"[需要人工输入] 第 {step} 步停下 —— 请你在手机上完成这一步"
     print(f"\n{'=' * 56}")
-    print(f"[需要人工输入] 第 {step} 步停下 —— 请你在手机上完成这一步")
+    print(headline)
     print(f"原因：{reason}")
 
     pkg = current_package(device)
@@ -399,7 +436,9 @@ def report_need_human(device: str | None, img: Image.Image, step: int,
         print(f"[警告] 截图保存失败（{exc}）—— 事后无法核对停在哪个界面")
 
     print("=" * 56)
-    print(f"[结论] 任务【未完成】—— 退出码 {EXIT_NEED_HUMAN} = "
-          f"需要人工输入（密码），**不是失败**")
-    print("       脚本已停在原处，等你输完密码后可重新发起任务。")
+    if conclusion is None:
+        conclusion = (f"[结论] 任务【未完成】—— 退出码 {EXIT_NEED_HUMAN} = "
+                      f"需要人工输入（密码），**不是失败**\n"
+                      f"       脚本已停在原处，等你输完密码后可重新发起任务。")
+    print(conclusion)
     print("       不要据此回复「任务失败」，也不要编造脚本没说过的原因。")

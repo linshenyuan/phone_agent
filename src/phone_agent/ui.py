@@ -317,3 +317,37 @@ def focus_editable_box(device: str | None = None,
         extra = "" if len(edits) == 1 else f"（界面上有 {len(edits)} 个输入框）"
         info(f"[聚焦] 输入框未聚焦，已点击其中心 ({cx}, {cy}){extra}")
     return True, f"已点击输入框 ({cx}, {cy})", None, False, False
+
+
+
+
+def point_hits_editable(device: str | None,
+                        real_point: tuple[float, float],
+                        margin_px: int = 24) -> bool | None:
+    """
+    ★ 2026-10-04 加：判断一个**真实像素**坐标是不是压在某个输入框上。
+
+    用途：给「连续 TYPE 保护」当清零判据 —— 只有模型真的点回输入框，才允许它
+    再打一次字。取代旧的「看 y 是否在屏幕下方」的猜测（换机型 / 横屏 / 浮窗会猜错）。
+
+    :param real_point: 真实像素坐标 (x, y)
+    :param margin_px:  容差；模型常常点得略偏，放宽这么多像素仍算命中
+    :return: True  —— 命中某个输入框
+             False —— 界面上有输入框，但这个坐标没压住任何一个
+             None  —— 判断不了：读不到界面树，或界面根本没暴露输入框
+                      （Flutter / WebView / 自绘界面，程序只能看到一张图）
+    """
+    xml = _dump_ui(device)
+    if xml is None:
+        return None
+    nodes = _parse_ui_nodes(xml)
+    edits = [n for n in nodes if _is_editable(n["cls"]) and n["bounds"]]
+    if not edits:
+        return None
+    x, y = real_point
+    for n in edits:
+        x1, y1, x2, y2 = n["bounds"]
+        if (x1 - margin_px <= x <= x2 + margin_px
+                and y1 - margin_px <= y <= y2 + margin_px):
+            return True
+    return False
