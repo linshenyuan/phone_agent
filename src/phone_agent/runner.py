@@ -155,12 +155,18 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
                 action["screen_text"] = " / ".join(texts)
                 info(f"[SLIDE 前查屏] {action['screen_text']}")
 
-        # 把模型最近一次点击的坐标传下去：TYPE 时用它判断「想往哪个输入框打字」
-        # （方案 A 的聚焦优先级用得到 —— 界面有多个输入框时，优先点它点过的那个）
+        # 把模型最近一次点击的坐标传下去：TYPE 时用它判断「想往哪个输入框打字」。
+        # ★★ 2026-10-04：只有「上一步动作本身就是 CLICK」时才传坐标。
+        #   否则（模型点完又滑动/返回/等待才 TYPE）坐标是旧的，落在别的框里会误聚焦。
         last_click = stuck.clicks[-1] if stuck.clicks else None
+        prev_action = history[-1] if history else None
+        prefer_point = (last_click
+                        if prev_action is not None
+                        and str(prev_action.get("action_type", "")).upper() == "CLICK"
+                        else None)
         try:
             res = execute_action(action, real_img.size, device, has_yadb, dry_run,
-                                 prefer_point=last_click)
+                                 prefer_point=prefer_point)
         except AdbError as exc:
             print(f"[错误] 执行失败：{exc}")
             return 1

@@ -208,33 +208,32 @@ def _pick_editable(nodes: list[dict[str, Any]],
                    prefer_point: tuple[float, float] | None = None
                    ) -> dict[str, Any] | None:
     """
-    从节点里挑一个最像「该被打字的输入框」的。优先级：
+    从节点里挑一个「该被打字的输入框」。规则刻意保守，避免把字打进错误的框：
 
-      1. 已经聚焦的 —— 直接用，根本不用点
-      2. 包含 prefer_point（模型最近一次点击的真实坐标）的 —— 它点哪儿就想往哪儿打字
-      3. 面积最大的 focusable 输入框 —— 聊天 / 搜索的输入框通常最宽
+      * 单个输入框 -> 直接点它（聊天输入框 / 搜索框等绝大多数场景，命中率接近 100%）
+      * 多个输入框 -> 仅当 prefer_point（模型上一步 CLICK 的真实坐标）落在某个框内时才点它
+      * 多个输入框且坐标不命中任何框 -> 返回 None，**不猜测**（交给调用方停下询问）
 
-    :param prefer_point: 真实像素坐标；传 None 表示没有可参考的点击
+    ★★ 不再用「面积最大」兜底：那是纯猜测，登录页 / 设置页 / 聊天+搜索页会选错框，
+       而且打错框会被回读验证误判成「成功」，危害比「没聚焦」更大。
+
+    :param prefer_point: 真实像素坐标；传 None 表示没有可参考的点击（上一步不是 CLICK）
     """
     edits = [n for n in nodes if _is_editable(n["cls"]) and n["bounds"]]
     if not edits:
         return None
-    for n in edits:
-        if n["focused"]:
-            return n
+    # 单个输入框：安全，直接点
+    if len(edits) == 1:
+        return edits[0]
+    # 多个输入框：只有模型明确点过其中某个时，才帮它聚焦
     if prefer_point is not None:
         px, py = prefer_point
         for n in edits:
             x1, y1, x2, y2 = n["bounds"]
             if x1 <= px <= x2 and y1 <= py <= y2:
                 return n
-    focusable = [n for n in edits if n["focusable"]] or edits
-
-    def area(n: dict[str, Any]) -> int:
-        x1, y1, x2, y2 = n["bounds"]
-        return (x2 - x1) * (y2 - y1)
-
-    return max(focusable, key=area)
+    # 多框且无明确目标：不猜，返回 None
+    return None
 
 
 
@@ -254,8 +253,12 @@ def focus_editable_box(device: str | None = None,
     策略保守，避免把字打进错误的框：
       * 已经聚焦 -> 什么都不做
       * 界面上只有一个输入框 -> 点它中心（绝大多数场景：聊天输入框、搜索框）
-      * 多个输入框 -> 优先选模型最近点过的那个，都没有才取面积最大的
+      * 多个输入框 -> 仅当模型「上一步 CLICK」的坐标落在某个框内时才点它
+      * 多个输入框且坐标不命中任何框 -> **不猜测**，返回歧义标记，由调用方停下询问
       * 一个输入框都没有（Flutter/WebView/自绘界面）-> 不动手，交给调用方按原逻辑处理
+
+    ★★ 2026-10-04：取消「面积最大」兜底。那是纯猜测，登录/设置/聊天+搜索页会选错框，
+       而且打错框会被回读验证误判成功，比「没聚焦」危害更大。歧义时改为显式停下。
 
     ★ 关于 focusable：**不能把它当硬条件**。实测 vivo 设置的搜索框
       `focusable="false"`（但它确实能被点开、能打字），所以这里用
@@ -267,7 +270,9 @@ def focus_editable_box(device: str | None = None,
       _focused_editable_node —— 旧写法会把「密码框已聚焦」误判成「没有聚焦」，
       从而对一个已经聚焦的密码框再多点一下。
 
-    :return: (是否已就绪, 说明文字, 聚焦输入框的当前文字, 是否密码框)
+    :return: (是否已就绪, 说明文字, 聚焦输入框的当前文字, 是否密码框, 是否歧义)
+             第五个元素 `ambiguous=True` 表示「多个输入框且无法确定目标」，
+             调用方应停下询问用户先点击目标框，而不是猜一个。
              第三个元素**只在「本来就已聚焦且不是密码框」时非 None** —— 调用方可以直接拿它
              当 TYPE 前的基线，省掉一次 dump（实测一次约 1.7 秒）。
              点了输入框之后界面会重排（实测 bounds 从 (156,288,1020,384) 变成
@@ -275,22 +280,28 @@ def focus_editable_box(device: str | None = None,
     """
     xml = _dump_ui(device)
     if xml is None:
-        return True, "读不到界面树，跳过聚焦检查", None, False
+        return True, "读不到界面树，跳过聚焦检查", None, False, False
 
     nodes = _parse_ui_nodes(xml)
     edits = [n for n in nodes if _is_editable(n["cls"]) and n["bounds"]]
     if not edits:
-        return True, "界面上没有可输入框，跳过聚焦检查", None, False
+        return True, "界面上没有可输入框，跳过聚焦检查", None, False, False
 
     already = _focused_editable_node(nodes)
     if already is not None:
         if already.get("password"):
-            return True, "聚焦的是密码框", None, True
-        return True, "输入框已聚焦", already["text"], False
+            return True, "聚焦的是密码框", None, True, False
+        return True, "输入框已聚焦", already["text"], False, False
 
     target = _pick_editable(nodes, prefer_point)
     if target is None:
-        return True, "没挑出可点的输入框，跳过", None, False
+        # 走到这里基本是「多个输入框 + 坐标不命中任何框」—— 歧义，不猜。
+        # 交给调用方停下询问用户先点击目标框，避免把字打进错误的框。
+        if len(edits) > 1:
+            return (False,
+                    "检测到多个输入框但无法确定目标，请先点击要输入的框再 TYPE",
+                    None, False, True)
+        return True, "没挑出可点的输入框，跳过", None, False, False
 
     x1, y1, x2, y2 = target["bounds"]
     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
@@ -298,11 +309,11 @@ def focus_editable_box(device: str | None = None,
     if is_pwd:
         # ★ 不点。点了就等于替用户决定「往密码框里打字」—— 密码一律留给人工。
         #   直接把「这是密码框」报回去，让调用方停下。
-        return True, f"目标输入框是密码框（({cx}, {cy})），未点击", None, True
+        return True, f"目标输入框是密码框（({cx}, {cy})），未点击", None, True, False
 
     tap(cx, cy, device)
     time.sleep(TYPE_FOCUS_TAP_DELAY)
     if verbose:
         extra = "" if len(edits) == 1 else f"（界面上有 {len(edits)} 个输入框）"
         info(f"[聚焦] 输入框未聚焦，已点击其中心 ({cx}, {cy}){extra}")
-    return True, f"已点击输入框 ({cx}, {cy})", None, False
+    return True, f"已点击输入框 ({cx}, {cy})", None, False, False

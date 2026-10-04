@@ -277,8 +277,17 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
         #   yadb 的字哪儿都不去 -> 连续 3 次判失败 -> 退出码 2 -> 用户看到
         #   「助手拒绝发消息」。受控复现证明差别只在聚焦（点一下 414ms 就上屏）。
         pref_real = to_real(prefer_point) if prefer_point is not None else None
-        _ready, _note, baseline, is_pwd = focus_editable_box(
+        _ready, _note, baseline, is_pwd, ambiguous = focus_editable_box(
             device, prefer_point=pref_real, verbose=not dry_run)
+
+        # ★★ 多个输入框且无法确定目标 -> 停下询问用户先点击目标框（2026-10-04 加）
+        #   不猜测 = 避免把字打进错误的框（打错框会被回读验证误判成功，危害更大）。
+        if ambiguous:
+            return ExecResult(
+                False,
+                _note,
+                need_human=True,
+                human_reason="界面有多个输入框但模型未明确点击目标框")
 
         # ★★ 撞上密码框 -> 停下，交给人工（2026-10-01 加）
         #   为什么必须停：① 密码属于敏感信息，不该由脚本代输；
