@@ -7,7 +7,7 @@ import io
 import json
 from typing import Any
 
-from .config import DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, MODEL_RETRY, MODEL_RETRY_BACKOFF
+from .config import COORD_RANGE_TOLERANCE, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, MODEL_RETRY, MODEL_RETRY_BACKOFF
 from .output import info
 from .deps import Image, OpenAI
 import re
@@ -179,6 +179,17 @@ def resize_for_model(img: Image.Image, target_width: int) -> Image.Image:
 
 
 
+class InvalidActionError(ValueError):
+    """
+    模型动作**值**不合法（坐标越界、TYPE 空值等）—— 与「格式不认得」区分开。
+
+    ★ 为什么要单独一个类（2026-10-04）：parse_action 在 JSON 解析失败时会回落到
+      key:value 再试一次。若把「坐标越界」也当成普通 ValueError，就会先被 JSON 分支
+      吞掉、再拿同一段文本硬解析，最后报出「找不到动作名」这种**与事实不符**的错误。
+      值非法时应当**直接判失败、交给 ask_model 重试重问**，不回落。
+    """
+
+
 def parse_point(value: Any) -> tuple[float, float]:
     """
     把坐标值解析成 (x, y) 归一化数值（0-1000）。
@@ -197,6 +208,28 @@ def parse_point(value: Any) -> tuple[float, float]:
 
 
 
+def _checked_point(value: Any, label: str) -> tuple[float, float]:
+    """
+    解析坐标并做范围校验（2026-10-04 加）。
+
+    模型报位置用的是 0-1000 的比例数（0=最左/最上，1000=最右/最下）。
+    允许 ±COORD_RANGE_TOLERANCE 的小幅越界（容忍四舍五入），
+    明显越界（如 -100 / 99999）则判非法 —— 抛错交给 ask_model 重试重问。
+
+    ★ 为什么不再「硬拉回屏幕边」：那样会在模型明显给错坐标时仍然点下去，
+      而且点到的位置和模型本意无关，后续行为极难排查（2026-10-04 用户反馈）。
+    """
+    p = parse_point(value)
+    lo, hi = -COORD_RANGE_TOLERANCE, 1000 + COORD_RANGE_TOLERANCE
+    if not (lo <= p[0] <= hi and lo <= p[1] <= hi):
+        raise InvalidActionError(
+            f"{label} 坐标越界：{p} —— 应在 0-1000 之间"
+            f"（允许 ±{COORD_RANGE_TOLERANCE} 误差），已拒绝执行，请重新给出坐标")
+    return p
+
+
+
+
 def normalize_action(obj: dict[str, Any]) -> dict[str, Any]:
     """
     把模型给出的动作统一成内部格式。
@@ -208,6 +241,9 @@ def normalize_action(obj: dict[str, Any]) -> dict[str, Any]:
       * GELab-Zero 官方：action_type / point / value
       * 官方 uiTars 变体：action / coordinate
       * 我早期写的：action / x / y
+
+    ★ 坐标做范围校验（2026-10-04 加）：明显越界（如 -100 / 99999）抛错，
+      交给 ask_model 重试重问，而不是留到 to_real 里偷偷夹回屏幕。
     """
     name = str(
         obj.get("action_type") or obj.get("action") or obj.get("type") or ""
@@ -223,7 +259,7 @@ def normalize_action(obj: dict[str, Any]) -> dict[str, Any]:
             point = obj.get("coordinate")
         if point is None and "x" in obj and "y" in obj:
             point = (obj["x"], obj["y"])
-        out["point"] = parse_point(point)
+        out["point"] = _checked_point(point, name)
         if name == "LONGPRESS":
             out["duration"] = float(obj.get("duration", DEFAULT_LONGPRESS_DURATION))
 
@@ -235,8 +271,8 @@ def normalize_action(obj: dict[str, Any]) -> dict[str, Any]:
             p1 = (obj["x1"], obj["y1"])
         if p2 is None and "x2" in obj and "y2" in obj:
             p2 = (obj["x2"], obj["y2"])
-        out["point1"] = parse_point(p1)
-        out["point2"] = parse_point(p2)
+        out["point1"] = _checked_point(p1, "SLIDE 起点")
+        out["point2"] = _checked_point(p2, "SLIDE 终点")
         out["duration"] = float(obj.get("duration", DEFAULT_SLIDE_DURATION))
 
     elif name == "TYPE":
@@ -247,7 +283,7 @@ def normalize_action(obj: dict[str, Any]) -> dict[str, Any]:
         #   两者叠加 = 模型可以无限输出空 TYPE，每步都"成功"且不触发任何保护，
         #   直到步数烧完。抛错交给 ask_model 的重试接住，比让它静默空转好。
         if not out["value"]:
-            raise ValueError("TYPE 动作的 value 为空 —— 模型没给出要输入的文字")
+            raise InvalidActionError("TYPE 动作的 value 为空 —— 模型没给出要输入的文字")
 
     elif name == "WAIT":
         out["seconds"] = float(obj.get("seconds") or obj.get("duration") or 3)
@@ -289,8 +325,10 @@ def parse_action(text: str) -> dict[str, Any]:
             obj = json.loads(raw[start:end + 1])
             if isinstance(obj, dict):
                 return normalize_action(obj)
+        except InvalidActionError:
+            raise  # ★ 值不合法（坐标越界 / TYPE 空值）：直接判失败、重试重问，不回落
         except (json.JSONDecodeError, ValueError, TypeError):
-            pass  # 落到下面的 key:value 路径
+            pass  # 格式问题：落到下面的 key:value 路径
 
     # 路径二：action:CLICK<TAB>point:500,800
     # ★ 模型未必遵守「制表符分隔」—— 实测 4B 常输出空格，而旧实现会把整段
