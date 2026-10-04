@@ -170,16 +170,16 @@ my_project/
 ├── bin/
 │   └── yadb                    中文输入用的二进制（必需，随仓库分发）
 ├── src/phone_agent/
-│   ├── config.py       250 行   所有常量 + _PROJECT_ROOT
+│   ├── config.py       245 行   所有常量 + _PROJECT_ROOT
 │   ├── deps.py          15 行   第三方依赖统一导入
 │   ├── output.py       128 行   输出控制 + 日志/截图清理
 │   ├── adb.py          253 行   ADB 基础（命令/设备/截图/点击/滑动/按键）
 │   ├── apps.py         344 行   App 操作（包名解析/启动/复位/中文输入）
-│   ├── ui.py           319 行   界面树解析（dump/节点/输入框/可见文字）
+│   ├── ui.py           353 行   界面树解析（dump/节点/输入框/可见文字）
 │   ├── vision.py       446 行   模型交互（提示词/解析/请求重试）
 │   ├── tasks.py        155 行   任务判定（纯打开/简单任务/发文字）
-│   ├── actions.py      405 行   动作执行 + 卡死检测
-│   ├── runner.py       256 行   主循环
+│   ├── actions.py      444 行   动作执行 + 卡死检测
+│   ├── runner.py       289 行   主循环
 │   └── phone_agent.py  134 行   命令行入口
 └── log/  tmp/                  ← 运行时自动创建，已在 .gitignore（不随仓库分发）
 ```
