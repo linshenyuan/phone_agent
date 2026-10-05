@@ -85,51 +85,57 @@ def main() -> int:
     #   在这里写 `global QUIET` 改不到它。
     output.setup_log(args.log_file, args.no_log, args.quiet)
 
-    device = pick_device(args.device)
-    if device is None:
-        print("没有检测到在线设备。请：\n"
-              "  1. 用 USB 线连接手机，USB 用途选「文件传输」\n"
-              "  2. 手机设置里打开「开发者选项」->「USB 调试」\n"
-              "  3. 手机上弹出授权提示时点「允许」\n"
-              "  4. 执行 adb devices 确认状态是 device\n")
-        return 1
-
-    info(f"使用设备：{device}")
-    info(f"任务：{args.task}")
-    info(f"模型：{args.model} @ {args.api_base}")
-    info(f"退出码约定：0=完成  1=出错  2=卡死/输入失败被提前终止  "
-         f"3=完成但可疑（可能是假成功，需人工核对）  "
-         f"{EXIT_NEED_HUMAN}=需要人工输入（撞上密码框，已停下等你操作，不是失败）")
-
-    client = OpenAI(base_url=args.api_base, api_key=args.api_key,
-                    http_client=build_http_client())
-
-    # 先探一次模型服务，避免跑到一半才发现 llama-server 没起
+    # ★ 日志装配后必须保证收尾（2026-10-05）：无论正常返回、抛异常还是 Ctrl+C，
+    #   finally 都会把 stdout/stderr 还原、把日志文件关掉 —— 尤其是当本函数被
+    #   当作 library 调用时，不能把调用方的 stdout 一直换着。
     try:
-        models = client.models.list()
-    except Exception as exc:
-        print(f"\n连不上模型服务：{exc}\n"
-              f"请确认 llama-server 已在 {args.api_base} 启动。")
-        return 1
+        device = pick_device(args.device)
+        if device is None:
+            print("没有检测到在线设备。请：\n"
+                  "  1. 用 USB 线连接手机，USB 用途选「文件传输」\n"
+                  "  2. 手机设置里打开「开发者选项」->「USB 调试」\n"
+                  "  3. 手机上弹出授权提示时点「允许」\n"
+                  "  4. 执行 adb devices 确认状态是 device\n")
+            return 1
 
-    # ★ 模型名兜底：服务端实际提供的 id 未必等于我们配置的名字。
-    #   典型场景：llama-server 没带 -Alias 启动，别名是从文件名推导的
-    #   （如 `stepfun-ai_GELab-Zero-4B-preview`），而我们默认发 `GELab-Zero`。
-    #   与其让每步请求都失败，不如自动改用服务端真实提供的那个名字。
-    model = args.model
-    available = served_model_ids(models)
-    if available and not model_name_matches(model, available):
-        fallback = available[0]
-        print(f"[模型名兜底] 服务端没有「{model}」，实际提供的是：{', '.join(available)}")
-        print(f"[模型名兜底] 自动改用「{fallback}」")
-        print(f"            （要固定用「{model}」，请让 llama-server 带 "
-              f"-Alias {model} 启动）")
-        model = fallback
+        info(f"使用设备：{device}")
+        info(f"任务：{args.task}")
+        info(f"模型：{args.model} @ {args.api_base}")
+        info(f"退出码约定：0=完成  1=出错  2=卡死/输入失败被提前终止  "
+             f"3=完成但可疑（可能是假成功，需人工核对）  "
+             f"{EXIT_NEED_HUMAN}=需要人工输入（撞上密码框，已停下等你操作，不是失败）")
 
-    return run(args.task, device, client, model, args.view_width,
-               args.max_steps, args.step_delay, args.dry_run,
-               reset_app=args.reset_app, no_reset=args.no_reset,
-               auto_launch=not args.no_auto_launch)
+        client = OpenAI(base_url=args.api_base, api_key=args.api_key,
+                        http_client=build_http_client())
+
+        # 先探一次模型服务，避免跑到一半才发现 llama-server 没起
+        try:
+            models = client.models.list()
+        except Exception as exc:
+            print(f"\n连不上模型服务：{exc}\n"
+                  f"请确认 llama-server 已在 {args.api_base} 启动。")
+            return 1
+
+        # ★ 模型名兜底：服务端实际提供的 id 未必等于我们配置的名字。
+        #   典型场景：llama-server 没带 -Alias 启动，别名是从文件名推导的
+        #   （如 `stepfun-ai_GELab-Zero-4B-preview`），而我们默认发 `GELab-Zero`。
+        #   与其让每步请求都失败，不如自动改用服务端真实提供的那个名字。
+        model = args.model
+        available = served_model_ids(models)
+        if available and not model_name_matches(model, available):
+            fallback = available[0]
+            print(f"[模型名兜底] 服务端没有「{model}」，实际提供的是：{', '.join(available)}")
+            print(f"[模型名兜底] 自动改用「{fallback}」")
+            print(f"            （要固定用「{model}」，请让 llama-server 带 "
+                  f"-Alias {model} 启动）")
+            model = fallback
+
+        return run(args.task, device, client, model, args.view_width,
+                   args.max_steps, args.step_delay, args.dry_run,
+                   reset_app=args.reset_app, no_reset=args.no_reset,
+                   auto_launch=not args.no_auto_launch)
+    finally:
+        output.teardown_log()
 
 if __name__ == "__main__":
     sys.exit(main())

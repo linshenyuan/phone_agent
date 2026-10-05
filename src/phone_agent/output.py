@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import sys
 import time
 from pathlib import Path
@@ -74,17 +75,62 @@ QUIET = False
 _log_handle: Any = None
 
 
+# 装配前的原始 stdout/stderr —— teardown 时还原用（只还原、不关闭，它们是别人的）
+_ORIG_STDOUT: Any = None
+_ORIG_STDERR: Any = None
+
+
+# atexit 只注册一次
+_atexit_registered = False
+
+
+def teardown_log() -> None:
+    """
+    收尾：还原 stdout/stderr，并关闭自己开的日志文件。**可重复调用**（第二次起是空操作）。
+
+    ★ 为什么要有它（2026-10-05）：setup_log 换了 sys.stdout/stderr，原来却没有任何收尾。
+      CLI 一次性跑时进程退出、解释器会兜底关文件，问题不大；但作为 library 调用、
+      或嵌进长驻进程时，main() 返回后 stdout 还指着已关闭的日志文件 → 后续 print 出错。
+      所以必须有明确的 teardown，并在 main() 的 finally 里调用。
+
+    ★ 顺序：先还原 stdout/stderr，再关文件 —— 反了的话 Tee 还指着已关闭的文件，
+      收尾期间的任何 print 都会报错。
+    ★ 只动自己创建的东西：原始流只还原、不 close。
+    """
+    global _ORIG_STDOUT, _ORIG_STDERR, _log_handle, QUIET
+    if _ORIG_STDOUT is not None:
+        sys.stdout = _ORIG_STDOUT
+        _ORIG_STDOUT = None
+    if _ORIG_STDERR is not None:
+        sys.stderr = _ORIG_STDERR
+        _ORIG_STDERR = None
+    if _log_handle is not None:
+        try:
+            _log_handle.flush()
+            _log_handle.close()
+        except OSError:
+            pass
+        _log_handle = None
+    QUIET = False
+
+
 def setup_log(log_file: str | None = None, no_log: bool = False,
               quiet: bool = False) -> None:
     """
     装配日志：设置静默开关 + 打开日志文件 + 把 stdout/stderr 接上 Tee。
+
+    ★ 幂等（2026-10-05）：重复调用会先 teardown 上一次的装配，
+      不会套两层 Tee、也不会泄漏上一个 handle。
+    ★ 兜底：注册一次 `atexit.teardown_log`，万一调用方忘了收尾也能还原。
 
     ★ 为什么把这段从 main() 搬进来（2026-10-02 拆分时）：
       QUIET 和 _log_handle 是**本模块的**全局状态，main() 里写
       `global QUIET` 改的是它自己模块的变量，碰不到这里 —— 静默会失效。
       与其让调用方去改 `output.QUIET`，不如把整套装配封成一个函数。
     """
-    global QUIET, _log_handle
+    global QUIET, _log_handle, _ORIG_STDOUT, _ORIG_STDERR, _atexit_registered
+    # ★ 幂等：先拆掉上一次的装配（没有则空操作）
+    teardown_log()
     QUIET = quiet
     if no_log:
         return
@@ -99,8 +145,17 @@ def setup_log(log_file: str | None = None, no_log: bool = False,
     else:
         _log_handle = _open_log()
 
+    # 记下原始流（teardown 时还原用），再把 stdout/stderr 接上 Tee
+    _ORIG_STDOUT = sys.stdout
+    _ORIG_STDERR = sys.stderr
     sys.stdout = _Tee(sys.stdout, _log_handle)
     sys.stderr = _Tee(sys.stderr, _log_handle)
+
+    # 兜底收尾：异常 / 直接退出时也能还原。只注册一次。
+    if not _atexit_registered:
+        atexit.register(teardown_log)
+        _atexit_registered = True
+
     print(f"[日志] 完整日志：{_log_handle.name}")
 
 
