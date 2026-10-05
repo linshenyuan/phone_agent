@@ -150,6 +150,9 @@ def build_history_text(history: list[dict[str, Any]], limit: int = 12) -> str:
             desc = "COMPLETE"
         else:
             desc = name
+        # ★ 失败标记（2026-10-05 加）：让模型明确看到上一步失败了，别再原样重试
+        if act.get("failed"):
+            desc = f"❌ 失败：{desc} —— {act.get('error', '')}（别原样重试，换个办法）"
         lines.append(f"{i}. {desc}")
 
     if len(history) > limit:

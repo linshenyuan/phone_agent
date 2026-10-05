@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from .apps import APP_PACKAGES
+from .apps import load_app_aliases
 
 
 
@@ -88,7 +88,7 @@ def _is_pure_open_task(task: str, target_pkg: str) -> bool:
 
     # ② 剥掉这个 App 的名字（包名 + 中文别名）
     t = t.replace(target_pkg, "")
-    for alias, pkg in APP_PACKAGES.items():
+    for alias, pkg in load_app_aliases().items():
         if pkg == target_pkg:
             t = t.replace(alias, "")
 
@@ -126,7 +126,7 @@ def _is_trivial_task(task: str) -> bool:
         for v in ("帮我", "请", "麻烦", "打开", "启动", "进入", "开一下",
                   "手机上的", "手机的", "手机里的", "手机里", "一下"):
             residual = residual.replace(v, "")
-        for alias in sorted(APP_PACKAGES, key=len, reverse=True):
+        for alias in sorted(load_app_aliases(), key=len, reverse=True):
             if alias:
                 residual = residual.replace(alias, "")
         if not residual.strip():

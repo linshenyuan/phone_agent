@@ -9,7 +9,8 @@ from typing import Any
 from .actions import StuckDetector, execute_action, report_need_human
 from .adb import AdbError, screenshot
 from .apps import current_package, detect_app_in_task, ensure_yadb, launch_app, reset_to_home
-from .config import TMP_DIR, EXIT_NEED_HUMAN, MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL
+from .config import (APP_ALIASES_FILE, TMP_DIR, EXIT_NEED_HUMAN,
+                     MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, OPEN_FAIL_STREAK_MAX)
 from .output import info, prune_tmp
 from .tasks import _is_pure_open_task, _is_trivial_task, _looks_like_text_task
 from .ui import point_hits_editable, visible_texts
@@ -82,6 +83,8 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
 
     history: list[dict[str, Any]] = []
     finished_but_suspect = False
+    # ★ 连续 OPEN 失败计数（2026-10-05 加）：到 OPEN_FAIL_STREAK_MAX 就判「不支持的应用」收工
+    open_fail_streak = 0
 
     for step in range(1, max_steps + 1):
         real_img = screenshot(device)
@@ -205,7 +208,15 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
             return 1
 
         info(f"执行结果：{res.note}")
-        history.append(action)
+        # ★ 失败也要进历史（2026-10-05 改）：旧写法无论成败都塞原始动作，
+        #   模型看不到失败就会原样重试（OPEN 尤其致命：会无限 OPEN 同一个不存在的 App）。
+        if res.ok:
+            history.append(action)
+        else:
+            failed = dict(action)
+            failed["failed"] = True
+            failed["error"] = res.note
+            history.append(failed)
 
         # ★ 需要人工介入：立即停止，不再尝试（2026-10-01 加）
         if res.need_human:
@@ -220,6 +231,24 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
                 print("[终止] 文字输入无法完成，后续步骤只会重复尝试，提前结束")
                 print("=" * 56)
                 return 2
+            # ★ 连续 OPEN 失败到上限 -> 停下问用户是哪个应用（#3，2026-10-05）
+            if str(action.get("action_type", "")).upper() == "OPEN":
+                open_fail_streak += 1
+                if open_fail_streak >= OPEN_FAIL_STREAK_MAX:
+                    app_name = str(action.get("app", "")).strip()
+                    reason = (f"模型想打开「{app_name}」，但它不在应用白名单里，"
+                              f"无法启动 —— 请人工确认这是哪个 App")
+                    report_need_human(
+                        device, real_img, step, reason,
+                        headline="[模型无法识别该应用，请人工接手]",
+                        conclusion=(
+                            f"[结论] 任务【未完成】—— 退出码 {EXIT_NEED_HUMAN} = "
+                            f"不认识的应用，**不是脚本失败**\n"
+                            f"       解决办法：把「名称 = 包名」加进 {APP_ALIASES_FILE}，"
+                            f"再重新发起任务。"))
+                    return EXIT_NEED_HUMAN
+        else:
+            open_fail_streak = 0
         if res.finished:
             print(f"\n{'=' * 56}")
             print(f"任务完成（用了 {step} 步）")

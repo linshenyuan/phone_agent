@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
 
 from .adb import AdbError, adb, keyevent
-from .config import YADB_CANDIDATES, YADB_MD5
+from .config import APP_ALIASES_FILE, YADB_CANDIDATES, YADB_MD5
 from .output import info
 
 
@@ -52,35 +53,35 @@ def list_packages(refresh: bool = False, device: str | None = None) -> list[str]
 
 def resolve_package(name: str, device: str | None = None) -> str | None:
     """
-    把应用名称解析成包名。
+    把应用名解析成包名。**只认精确匹配**（2026-10-05 收紧）：
 
-    顺序：别名表精确 → 别名表包含 → 已安装包名精确 → 已安装包名子串 → 包名末段。
-    后三步是为了让模型直接写英文名（如 "spotify"）甚至直接写包名时也能命中。
+      1. 别名表精确（"微信" -> com.tencent.mm、"浏览器" -> com.microsoft.emmx）
+      2. 已安装包名精确（"com.tencent.mm" -> 它自己）
+
+    其余一律返回 None —— 由调用方判失败，让模型改用**精确别名或包名**。
+
+    ★ 为什么删掉模糊匹配（2026-10-05 用户反馈）：
+      旧的「双向包含」会把「微信读书」解析成微信（com.tencent.mm）、
+      「qq音乐」解析成 QQ —— 直接启动**错误的 App**，而且 Prompt 拦不住。
+      安全边界必须落在代码里。（支持的 App 名单见 ~/.phone_agent/apps.json，
+      要支持新 App 就往里加一条精确别名。）
     """
     key = (name or "").strip().lower()
     if not key:
         return None
 
-    if key in APP_PACKAGES:
-        return APP_PACKAGES[key]
+    # ① 别名表精确（白名单来自 ~/.phone_agent/apps.json，见 load_app_aliases）
+    aliases = load_app_aliases()
+    if key in aliases:
+        return aliases[key]
 
-    for alias, pkg in APP_PACKAGES.items():
-        if alias in key or key in alias:
-            return pkg
-
+    # ② 已安装包名精确
     try:
         installed = list_packages(device=device)
     except AdbError:
         return None
-
     for pkg in installed:
         if key == pkg.lower():
-            return pkg
-    for pkg in installed:
-        if key in pkg.lower():
-            return pkg
-    for pkg in installed:
-        if key in pkg.rsplit(".", 1)[-1].lower():
             return pkg
     return None
 
@@ -107,8 +108,8 @@ def launch_app(name_or_package: str, device: str | None = None) -> str:
     pkg = resolve_package(name_or_package, device=device)
     if not pkg:
         raise AdbError(
-            f"找不到应用「{name_or_package}」对应的包名 —— "
-            f"可以先用 list_packages() 看已安装的包，或把包名直接写进 app 参数"
+            f"未知应用「{name_or_package}」—— 只接受**精确**的应用别名"
+            f"（如「微信」「浏览器」）或**精确包名**（如 com.tencent.mm），不接受模糊名称"
         )
     adb("shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1",
         device=device)
@@ -135,9 +136,10 @@ def detect_app_in_task(task: str, device: str | None = None) -> str | None:
     if not t:
         return None
 
-    for alias in sorted(APP_PACKAGES, key=len, reverse=True):
+    aliases = load_app_aliases()
+    for alias in sorted(aliases, key=len, reverse=True):
         if alias and alias in t:
-            return APP_PACKAGES[alias]
+            return aliases[alias]
 
     try:
         installed = list_packages(device=device)
@@ -287,9 +289,10 @@ def input_text(text: str, device: str | None = None, has_yadb: bool = True) -> N
 # 应用启动（绕开桌面图标识别）
 # ============================================================
 
-# 应用名称 → 包名。键一律小写，中英文都收。
-# 只覆盖常用应用；查不到时会退回「已安装包名匹配」，仍不行才报错。
-APP_PACKAGES: dict[str, str] = {
+# ★ 内置默认白名单（种子）。真正的白名单在 ~/.phone_agent/apps.json：
+#   首次运行会用下面这份生成该文件，之后**只以文件为准**（增删应用改文件即可）。
+#   这里只作「文件缺失/损坏」时的兜底，正常运行时不再直接读它。
+_DEFAULT_APP_PACKAGES: dict[str, str] = {
     # ---- 中文名 ----
     "微信": "com.tencent.mm",
     "qq": "com.tencent.mobileqq",
@@ -328,6 +331,48 @@ APP_PACKAGES: dict[str, str] = {
     "pixiv": "jp.pxv.android",
     "settings": "com.android.settings",
 }
+
+
+# 白名单缓存：避免每次解析都读盘
+_APP_ALIASES_CACHE: dict[str, str] | None = None
+
+
+def load_app_aliases(refresh: bool = False) -> dict[str, str]:
+    """
+    读取应用白名单（别名 -> 包名）。
+
+    来源：`~/.phone_agent/apps.json`（路径见 config.APP_ALIASES_FILE）。
+      * 文件不存在 -> 用内置默认 `_DEFAULT_APP_PACKAGES` 生成一份，方便直接编辑；
+      * 文件存在   -> **只以文件为准**（增删应用改它即可，不用碰源码）；
+      * 读不到/格式坏 -> 退回内置默认，保证不崩。
+
+    ★ 为什么外置成文件（2026-10-05）：内置在源码里的白名单，加个 App 得改代码、
+      重装才生效。外置后用户/调用方 AI 直接改 json 就行。
+
+    :param refresh: 强制重新读盘（忽略缓存）
+    """
+    global _APP_ALIASES_CACHE
+    if _APP_ALIASES_CACHE is not None and not refresh:
+        return _APP_ALIASES_CACHE
+
+    path = APP_ALIASES_FILE
+    try:
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(_DEFAULT_APP_PACKAGES, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+            info(f"[应用白名单] 首次运行，已生成默认名单：{path}（以后加应用改它即可）")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("内容不是 {名称: 包名} 的字典")
+        cleaned = {str(k).strip().lower(): str(v).strip()
+                   for k, v in data.items() if str(k).strip() and str(v).strip()}
+        _APP_ALIASES_CACHE = cleaned
+    except Exception as exc:
+        info(f"[应用白名单] 读 {path} 失败（{exc}），改用内置默认名单")
+        _APP_ALIASES_CACHE = {k.lower(): v for k, v in _DEFAULT_APP_PACKAGES.items()}
+    return _APP_ALIASES_CACHE
 
 
 
