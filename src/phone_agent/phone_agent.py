@@ -16,7 +16,8 @@ from . import output
 from .output import info
 from .runner import run
 from .tasks import _strip_wrapping_quotes
-from .vision import build_http_client, model_name_matches, served_model_ids
+from .vision import (build_http_client, is_loopback_endpoint,
+                     model_name_matches, served_model_ids)
 from .deps import OpenAI
 
 
@@ -108,27 +109,49 @@ def main() -> int:
         client = OpenAI(base_url=args.api_base, api_key=args.api_key,
                         http_client=build_http_client())
 
+        # ★ 下面这些「本地 llama-server 专属」的兜底**只在回环端点启用**（2026-10-05 修）。
+        #   云端场景下它们全是错的（Claude 审查 #5）：
+        #     · `/models` 失败即致命 —— 可不少 OpenAI 兼容服务并不实现 /models
+        #     · 静默切到 available[0] —— 在云端那是「任意一个模型」（可能是
+        #       embedding 模型、或更贵的模型），而且**会收到你的截图**
+        #     · 宽松的名字匹配 —— 云端模型名是精确的
+        local = is_loopback_endpoint(args.api_base)
+
         # 先探一次模型服务，避免跑到一半才发现 llama-server 没起
+        models = None
         try:
             models = client.models.list()
         except Exception as exc:
-            print(f"\n连不上模型服务：{exc}\n"
-                  f"请确认 llama-server 已在 {args.api_base} 启动。")
-            return 1
+            if local:
+                print(f"\n连不上模型服务：{exc}\n"
+                      f"请确认 llama-server 已在 {args.api_base} 启动。")
+                return 1
+            print(f"[警告] 探测 {args.api_base} 的模型列表失败：{exc}")
+            print(f"        继续用配置的模型名「{args.model}」"
+                  f"—— 云端不一定实现 /models。")
 
         # ★ 模型名兜底：服务端实际提供的 id 未必等于我们配置的名字。
         #   典型场景：llama-server 没带 -Alias 启动，别名是从文件名推导的
         #   （如 `stepfun-ai_GELab-Zero-4B-preview`），而我们默认发 `GELab-Zero`。
         #   与其让每步请求都失败，不如自动改用服务端真实提供的那个名字。
         model = args.model
-        available = served_model_ids(models)
-        if available and not model_name_matches(model, available):
-            fallback = available[0]
-            print(f"[模型名兜底] 服务端没有「{model}」，实际提供的是：{', '.join(available)}")
-            print(f"[模型名兜底] 自动改用「{fallback}」")
-            print(f"            （要固定用「{model}」，请让 llama-server 带 "
-                  f"-Alias {model} 启动）")
-            model = fallback
+        if models is not None:
+            available = served_model_ids(models)
+            if available and not model_name_matches(model, available, loose=local):
+                if local:
+                    fallback = available[0]
+                    print(f"[模型名兜底] 服务端没有「{model}」，"
+                          f"实际提供的是：{', '.join(available)}")
+                    print(f"[模型名兜底] 自动改用「{fallback}」")
+                    print(f"            （要固定用「{model}」，请让 llama-server 带 "
+                          f"-Alias {model} 启动）")
+                    model = fallback
+                else:
+                    print(f"[错误] 服务端没有「{model}」，可用的是："
+                          f"{', '.join(available)}")
+                    print("       云端模型名必须精确匹配，**不会**自动改用别的模型 ——"
+                          " 那可能是 embedding 模型或更贵的模型，还会收到你的截图。")
+                    return 1
 
         return run(args.task, device, client, model, args.view_width,
                    args.max_steps, args.step_delay, args.dry_run,

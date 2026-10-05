@@ -7,7 +7,7 @@ import io
 import json
 from typing import Any
 
-from .config import COORD_RANGE_TOLERANCE, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, MODEL_RETRY, MODEL_RETRY_BACKOFF, WAIT_SECONDS_DEFAULT, WAIT_SECONDS_MAX
+from .config import COORD_RANGE_TOLERANCE, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, DURATION_MAX, DURATION_MIN, MODEL_RETRY, MODEL_RETRY_BACKOFF, WAIT_SECONDS_DEFAULT, WAIT_SECONDS_MAX
 from .output import info
 from .deps import Image, OpenAI
 import re
@@ -233,6 +233,42 @@ def _checked_point(value: Any, label: str) -> tuple[float, float]:
 
 
 
+def _checked_duration(raw: Any, default: float, label: str) -> float:
+    """
+    解析 duration（秒）并**钳制**到合法范围。
+
+    ★ 为什么是钳制而不是拒绝（2026-10-05）：提示词里从没提过 duration，
+      模型给个大数字不是「违规」而是「不知道」，拒绝只会白烧一次重试；
+      而 `duration:1000` 会让 `input swipe` 撞上 30s 超时、整轮以退出码 1 中止。
+      两害相权，钳制更划算。
+    """
+    if raw is None:
+        return float(default)
+    try:
+        secs = float(raw)
+    except (TypeError, ValueError):
+        raise InvalidActionError(f"{label} 的 duration 无法解析：{raw!r}")
+    if not (DURATION_MIN <= secs <= DURATION_MAX):
+        clamped = min(max(secs, DURATION_MIN), DURATION_MAX)
+        info(f"[{label}] duration {secs:g}s 越界，已钳制为 {clamped:g}s"
+             f"（合法范围 {DURATION_MIN:g}-{DURATION_MAX:g}s）")
+        return clamped
+    return secs
+
+
+# 认识的动作名白名单（2026-10-05 加）。
+# ★ 为什么需要：模型输出 `action:ENTER` 时，旧实现会「归一化成功」，一路走到
+#   execute_action 才报「不认识的动作」—— 白烧一步，而且不走 ask_model 的重试。
+#   在这里就抛 InvalidActionError，让 ask_model 立刻重新采样。
+#   含 execute_action 实际支持的全部动作 + normalize 的别名（SCROLL/LAUNCH/START_APP）。
+KNOWN_ACTIONS = (
+    "CLICK", "LONGPRESS", "SLIDE", "SCROLL", "TYPE", "WAIT",
+    "OPEN", "LAUNCH", "START_APP", "COMPLETE", "BACK", "HOME",
+)
+
+
+
+
 def normalize_action(obj: dict[str, Any]) -> dict[str, Any]:
     """
     把模型给出的动作统一成内部格式。
@@ -254,6 +290,12 @@ def normalize_action(obj: dict[str, Any]) -> dict[str, Any]:
     if not name:
         raise ValueError(f"模型输出里找不到动作名：{obj}")
 
+    # ★ 动作名白名单（2026-10-05）：不认识就**当场**判非法，交给 ask_model 重新采样；
+    #   旧实现会归一化成功、一路走到 execute_action 才报「不认识的动作」——白烧一步。
+    if name not in KNOWN_ACTIONS:
+        raise InvalidActionError(
+            f"不认识的动作名「{name}」—— 只支持：{', '.join(KNOWN_ACTIONS)}")
+
     out: dict[str, Any] = {"action_type": name}
 
     if name in ("CLICK", "LONGPRESS"):
@@ -264,7 +306,8 @@ def normalize_action(obj: dict[str, Any]) -> dict[str, Any]:
             point = (obj["x"], obj["y"])
         out["point"] = _checked_point(point, name)
         if name == "LONGPRESS":
-            out["duration"] = float(obj.get("duration", DEFAULT_LONGPRESS_DURATION))
+            out["duration"] = _checked_duration(
+                obj.get("duration"), DEFAULT_LONGPRESS_DURATION, "LONGPRESS")
 
     elif name in ("SLIDE", "SCROLL"):
         # 官方把 Scroll 映射成 SLIDE
@@ -276,7 +319,8 @@ def normalize_action(obj: dict[str, Any]) -> dict[str, Any]:
             p2 = (obj["x2"], obj["y2"])
         out["point1"] = _checked_point(p1, "SLIDE 起点")
         out["point2"] = _checked_point(p2, "SLIDE 终点")
-        out["duration"] = float(obj.get("duration", DEFAULT_SLIDE_DURATION))
+        out["duration"] = _checked_duration(
+            obj.get("duration"), DEFAULT_SLIDE_DURATION, "SLIDE")
 
     elif name == "TYPE":
         out["value"] = str(obj.get("value") or obj.get("text") or "")
@@ -314,9 +358,29 @@ def normalize_action(obj: dict[str, Any]) -> dict[str, Any]:
             or obj.get("name") or ""
         ).strip()
 
+    elif name == "COMPLETE":
+        # ★ 保留模型给的结论文本（2026-10-05）：execute_action 的 COMPLETE 分支是读
+        #   `action["value"]` 当 result_text 的，但旧 normalize_action 没有 COMPLETE
+        #   分支 → value 一路丢失 → ExecResult.result_text 永远是空串（等于死代码）。
+        #   「查一下明天天气」这类任务能跑完，却报不出答案，就是这条。
+        for k in ("value", "return", "text", "result"):
+            v = obj.get(k)
+            if v:
+                out["value"] = str(v)
+                break
+
     return out
 
 
+
+
+# key:value 路径**认哪些键**（2026-10-05 加）。
+# ★ 顺序有讲究：Python 正则的 `|` 是「最左优先」，所以 point1/point2 必须排在
+#   point 前面、action_type 必须排在 action 前面，否则会先匹配短名、把 `1:` 留给值。
+# ★ 刻意**不含** name / return / x / y 这些常见词或单字母键 —— 它们太容易出现在
+#   正文里（如地址、备注），加进来会重新引入「值被误切」的问题。
+_KV_KEYS = ("action_type", "action", "type", "point1", "point2", "point",
+            "coordinate", "value", "text", "app", "package", "duration", "seconds")
 
 
 def parse_action(text: str) -> dict[str, Any]:
@@ -349,19 +413,21 @@ def parse_action(text: str) -> dict[str, Any]:
             pass  # 格式问题：落到下面的 key:value 路径
 
     # 路径二：action:CLICK<TAB>point:500,800
-    # ★ 模型未必遵守「制表符分隔」—— 实测 4B 常输出空格，而旧实现会把整段
-    #   当成动作名：`action:CLICK point:500,800` -> `{'action':'CLICK point:500,800'}`
-    #   -> execute_action 返回「不认识的动作」-> 白烧一步。
-    #   所以先把「键: 之前」的空白统一成制表符，再按原逻辑切分。
-    #   (?<!:) 是必须的守卫：否则 `value: http://x` 会被切成 `value:` + `http://x`。
-    normalized = re.sub(r"(?<!:)\s+(?=[A-Za-z_][A-Za-z0-9_]*\s*:)", "\t", raw)
+    # ★★ 只认「已知键」，并让 value 一直取到**下一个已知键**为止（2026-10-05 修）。
+    #   旧实现先给所有 `词:` 前插制表符、再按制表符/换行切分，于是
+    #   `value:meet me at the cafe, address: 12 Main St` 会被从 `, address:` 处切断，
+    #   只输入 `meet me at the cafe`。更糟的是**它仍能通过回读校验** ——
+    #   半截消息被发出去，还被算作成功。
+    #   现在只把已知键当分隔符：value 里出现的 `词:`（地址、note 等）不再被误切。
     fields: dict[str, str] = {}
-    for chunk in re.split(r"[\t\n]+", normalized):
-        chunk = chunk.strip().strip(",").strip()
-        if not chunk or ":" not in chunk:
-            continue
-        key, _, value = chunk.partition(":")
-        fields[key.strip().lower()] = value.strip()
+    key_re = re.compile(
+        r"(?:^|[\s,\t\n])(?:" + "|".join(_KV_KEYS) + r")\s*:", re.I)
+    marks = list(key_re.finditer(raw))
+    for i, m in enumerate(marks):
+        key = m.group(0).strip().rstrip(":").strip().lower()
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(raw)
+        # 值取到下一个已知键之前；只去掉分隔用的尾逗号与首尾空白
+        fields[key] = raw[m.end():end].strip().strip(",").strip()
 
     if not fields:
         raise ValueError(f"模型输出既不是 JSON 也不是 key:value 格式：{raw[:200]}")
@@ -394,6 +460,21 @@ def build_http_client() -> Any:
 
 
 
+def is_loopback_endpoint(base_url: str) -> bool:
+    """
+    这个 API 端点是不是「本机」（回环地址）。
+
+    用途：区分**本地 llama-server** 与**云端服务商** —— 两者该用的兜底策略
+    完全不同（见 `model_name_matches(loose=)` 和 `phone_agent.main()` 的说明）。
+    """
+    from urllib.parse import urlparse
+    try:
+        host = (urlparse(base_url or "").hostname or "").strip().lower()
+    except ValueError:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
 def served_model_ids(models_obj: Any) -> list[str]:
     """从 `/v1/models` 的响应里取出服务端**实际可用**的模型 id 列表。"""
     out: list[str] = []
@@ -406,23 +487,33 @@ def served_model_ids(models_obj: Any) -> list[str]:
 
 
 
-def model_name_matches(want: str, available: list[str]) -> bool:
+def model_name_matches(want: str, available: list[str],
+                       loose: bool = True) -> bool:
     """
     配置的模型名是否对得上服务端提供的某个模型。
 
-    ★ 为什么需要「宽松匹配」（2026-09-30 实测踩坑）：
+    :param loose: True = 允许「一方包含另一方」的宽松匹配。
+                  **只该对本地 llama-server 开**（见下）；云端必须传 False。
+
+    ★ 为什么本地需要「宽松匹配」（2026-09-30 实测踩坑）：
       `start-api.ps1` 在**不指定 -Alias 时**会从模型文件名推导别名 ——
       `stepfun-ai_GELab-Zero-4B-preview-Q6_K.gguf` 会被剥掉量化后缀，
       得到 `stepfun-ai_GELab-Zero-4B-preview`。
       而本脚本默认发的是 `GELab-Zero`，两边对不上。
-      所以这里做三级宽松匹配：完全相等 → 忽略大小写相等 → 一方包含另一方。
+
+    ★ 为什么云端必须收紧（2026-10-05 修）：宽松规则在云端是**错的** ——
+      `model_name_matches("gpt-4o", ["gpt-4"])` 和 `["gpt-4o-mini"]` 都会返回 True
+      （子串命中），于是「配置的模型不存在」被误判成「存在」，一路带着错名字发请求。
+      云端模型名是精确的，只认大小写不敏感的完全相等。
     """
     w = (want or "").strip().lower()
     if not w:
         return False
     for a in available:
         al = a.lower()
-        if w == al or w in al or al in w:
+        if w == al:
+            return True
+        if loose and (w in al or al in w):
             return True
     return False
 

@@ -122,6 +122,12 @@ def pick_device(explicit: str | None) -> str | None:
         if explicit not in devices:
             sys.exit(f"指定的设备 {explicit} 不在线。当前在线：{', '.join(devices)}")
         return explicit
+    # ★ 多设备时必须显式指定（2026-10-05 修，Claude 审查 #4）：
+    #   旧实现直接 `return devices[0]`。对一个会**发消息**的工具来说，
+    #   「静默操作了错误的手机」是最糟的结果 —— 宁可报错让用户补 --device。
+    if len(devices) > 1:
+        sys.exit(f"检测到 {len(devices)} 台在线设备，请用 --device 指定要操作哪一台："
+                 f"{', '.join(devices)}")
     return devices[0]
 
 
