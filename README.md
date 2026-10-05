@@ -206,12 +206,13 @@ my_project/
 │   ├── ui.py           353 行   界面树解析（dump/节点/输入框/可见文字）
 │   ├── vision.py       502 行   模型交互（提示词/解析/请求重试）
 │   ├── tasks.py        159 行   任务判定（纯打开/简单任务/发文字）
-│   ├── actions.py      445 行   动作执行 + 卡死检测
+│   ├── actions.py      451 行   动作执行 + 卡死检测
 │   ├── runner.py       323 行   主循环
 │   └── phone_agent.py  140 行   命令行入口
 ├── tests/                      离线测试（标准库 unittest，不碰真机/模型）
 │   ├── fakes.py                假件与打桩工具
 │   ├── test_runner_flow.py     主循环控制流
+│   ├── test_stuck_detector.py  卡死检测 / 连续 TYPE 保护
 │   └── test_regressions.py     已修真机坑的回归
 └── log/  tmp/                  ← 运行时自动创建，已在 .gitignore（不随仓库分发）
 ```
@@ -252,6 +253,7 @@ python -m unittest discover -s tests -v
 | 文件 | 测什么 |
 |---|---|
 | `tests/test_runner_flow.py` | 主循环**控制流**：退出码、被拦后是否继续决策、失败是否写进历史、卡死 / 人工介入 / 步数耗尽 / 纯打开短路 |
+| `tests/test_stuck_detector.py` | `StuckDetector` 独立测试：点击打转 / 连续 TYPE 保护 / 滑动上限 / 升级人工 |
 | `tests/test_regressions.py` | 把修过的真机坑冻住：坐标越界、WAIT 范围、App 精确解析、纯打开别名顺序、日志同名后缀 |
 
 - 用标准库 `unittest`，**不需要装 pytest**。
