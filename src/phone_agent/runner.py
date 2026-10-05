@@ -56,12 +56,17 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
     #   注意：--no-reset 时跳过（用户明确要求沿用当前屏幕，不该被顶掉）。
     if auto_launch and not dry_run and not no_reset:
         target = detect_app_in_task(task, device)
-        if target:
+        # ★ 只有「纯打开」任务才自动启动（2026-10-05 修 detect_app_in_task 误启动）：
+        #   旧实现把 detect_app_in_task 的**模糊猜测**直接拿去启动 ——
+        #   任务「打开微信读书」里含别名「微信」→ 被猜成微信 → 启动了**错误的 App**。
+        #   现在要求：任务剥掉「打开」类动词 + 这个 App 的别名后**什么都不剩**
+        #   （即纯打开），才允许自动启动；否则交给模型自己 OPEN（提示词已要求）。
+        if target and _is_pure_open_task(task, target):
             try:
                 launch_app(target, device)
                 time.sleep(1.2)          # 等首屏渲染出来，避免截到启动画面
                 fg = current_package(device)
-                info(f"[自动启动] 任务提到目标 App，已用 adb 拉起：{target}"
+                info(f"[自动启动] 纯打开任务，已用 adb 拉起：{target}"
                      f"（当前前台：{fg}）")
 
                 # ★ 纯打开类任务：App 已在前台就直接收工，不烧模型（2026-10-01 加）
@@ -70,7 +75,7 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
                 #   护栏用 _is_pure_open_task 而不是 _is_trivial_task ——
                 #   后者用「长度 ≤ 8」当判据，「打开微信发消息」(7 字) 会被误判成
                 #   纯打开任务，导致消息没发就宣布完成。
-                if fg == target and _is_pure_open_task(task, target):
+                if fg == target:
                     print(f"\n{'=' * 56}")
                     print("任务完成（App 已启动；纯打开类任务，无需模型决策）")
                     print("=" * 56)
@@ -79,7 +84,7 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
             except AdbError as exc:
                 info(f"[自动启动] 跳过：{exc}")
         else:
-            info("[自动启动] 任务里没识别出明确的 App，从当前屏幕起步")
+            info("[自动启动] 不是「纯打开」任务或没识别出明确 App，从当前屏幕起步")
 
     history: list[dict[str, Any]] = []
     finished_but_suspect = False

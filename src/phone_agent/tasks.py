@@ -87,9 +87,13 @@ def _is_pure_open_task(task: str, target_pkg: str) -> bool:
         t = t.replace(v, "")
 
     # ② 剥掉这个 App 的名字（包名 + 中文别名）
+    #    ★ 按**长度从长到短**剥（2026-10-05 修）：字典顺序下「设置」会先于
+    #      「系统设置」被剥，把「系统设置」剥成「系统」，导致纯打开任务被误判为
+    #      「不是纯打开」。长别名先剥才能整词剥干净。
     t = t.replace(target_pkg, "")
-    for alias, pkg in load_app_aliases().items():
-        if pkg == target_pkg:
+    aliases = load_app_aliases()
+    for alias in sorted(aliases, key=len, reverse=True):
+        if aliases[alias] == target_pkg:
             t = t.replace(alias, "")
 
     # ③ 剥掉标点和空白
