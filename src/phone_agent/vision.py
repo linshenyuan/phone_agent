@@ -202,7 +202,12 @@ def parse_point(value: Any) -> tuple[float, float]:
     if isinstance(value, (list, tuple)) and len(value) >= 2:
         return float(value[0]), float(value[1])
     if isinstance(value, dict):
-        return float(value.get("x", 0)), float(value.get("y", 0))
+        # ★ 缺 x/y 不再静默当 (0,0)（2026-10-05）：那会**点屏幕左上角**，
+        #   而且 0 能通过范围校验，一路点下去毫无提示。宁可判非法交给重试。
+        if "x" not in value or "y" not in value:
+            raise InvalidActionError(
+                f"坐标 dict 缺 x/y：{value!r} —— 拒绝按 (0,0) 猜（那是屏幕左上角）")
+        return float(value["x"]), float(value["y"])
     parts = re.split(r"[,\s]+", str(value).strip().strip("[](){}"))
     if len(parts) >= 2:
         return float(parts[0]), float(parts[1])

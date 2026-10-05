@@ -163,5 +163,65 @@ class 黑屏时停下问人工(unittest.TestCase):
         self.assertLessEqual(h.model_calls, 1, "连续黑屏应尽快停下，不该一直烧模型")
 
 
+class 退出路径都有结论行(unittest.TestCase):
+    """★ mimo P1-6：5 条退出路径都必须留 [结论] 行，否则调用方会自己编原因。"""
+
+    def test_步数耗尽(self):
+        with runner_env([CLICK()]) as h:
+            rc = run_task("打开设置", max_steps=2)
+        self.assertEqual(rc, 1)
+        self.assertIn("[结论]", h.output)
+
+    def test_卡死(self):
+        with runner_env([CLICK(500, 800)] * 6) as h:
+            rc = run_task("打开设置", max_steps=10)
+        self.assertEqual(rc, 2)
+        self.assertIn("[结论]", h.output)
+
+    def test_TYPE失败(self):
+        with runner_env([TYPE("你好")],
+                        exec_fn=lambda a: ExecResult(ok=False, note="输入失败")) as h:
+            rc = run_task("给张三发消息", max_steps=5)
+        self.assertEqual(rc, 2)
+        self.assertIn("[结论]", h.output)
+
+    def test_模型调用失败(self):
+        def boom(*a, **k):
+            raise RuntimeError("model down")
+        with runner_env([CLICK()], overrides={"ask_model": boom}) as h:
+            rc = run_task("打开设置", max_steps=3)
+        self.assertEqual(rc, 1)
+        self.assertIn("[结论]", h.output)
+
+    def test_执行抛AdbError(self):
+        from phone_agent.adb import AdbError
+
+        def boom(action, *a, **k):
+            raise AdbError("device offline")
+
+        with runner_env([CLICK()], overrides={"execute_action": boom}) as h:
+            rc = run_task("打开设置", max_steps=3)
+        self.assertEqual(rc, 1)
+        self.assertIn("[结论]", h.output)
+
+
+class dry_run不碰手机(unittest.TestCase):
+    """★ mimo P1-2：dry-run 不该往手机 push 任何东西。"""
+
+    def test_dry_run不调用ensure_yadb(self):
+        calls: list[int] = []
+
+        def fake_yadb(*a, **k):
+            calls.append(1)
+            return True
+
+        with runner_env([CLICK()], overrides={"ensure_yadb": fake_yadb}) as h:
+            rc = R.run(task="打开设置", device=None, client=object(), model="m",
+                       view_width=720, max_steps=2, step_delay=0.0,
+                       auto_launch=False, dry_run=True)
+        self.assertEqual(calls, [], "dry-run 不该调用 ensure_yadb（会往手机 push）")
+        self.assertIn("dry-run", h.output)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

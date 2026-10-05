@@ -74,6 +74,7 @@ class Handle:
         self.exec_calls: list[dict] = []        # 真正执行过的动作
         self.report_calls: list[str] = []       # report_need_human 的原因
         self.launch_calls: list[str] = []       # launch_app 的入参
+        self.output: str = ""                   # 被吞掉的 stdout（退出后填充，供断言）
 
     @property
     def model_calls(self) -> int:
@@ -172,14 +173,17 @@ def runner_env(actions, *, exec_fn=None, cur_pkg="com.android.settings",
     }
     patchers.update(overrides or {})
 
-    # 顺手把 runner 的 print/info 吞掉 —— 否则测试输出全是步骤日志
+    # 顺手把 runner 的 print/info 吞掉 —— 否则测试输出全是步骤日志。
+    # 吞掉的内容留在 h.output 里，供「必须有 [结论] 行」这类断言使用。
+    buf = io.StringIO()
     with mock.patch.multiple(R, **patchers), \
             mock.patch.multiple(A, APP_ALIASES_FILE=tmp / "apps.json",
                                 _APP_ALIASES_CACHE=None), \
-            redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            redirect_stdout(buf), redirect_stderr(io.StringIO()):
         try:
             yield h
         finally:
+            h.output = buf.getvalue()
             for p in tmp.glob("*"):
                 p.unlink()
             tmp.rmdir()

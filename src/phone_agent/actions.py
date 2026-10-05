@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +14,16 @@ from .output import info, prune_tmp, redact_text
 from .ui import focus_editable_box, read_focused_text
 from .vision import parse_point
 from .deps import Image
+
+def _norm(s: Any) -> str:
+    """
+    去掉所有空白 —— 用于比较「输入框里读到的字」和「我们想输入的字」。
+
+    必要性（2026-10-05）：手机号 / 金额 / 日期类输入框会自动插空格
+    （输入 `13812345678`，框里读到 `138 1234 5678`），直接比会误判失败。
+    """
+    return re.sub(r"\s+", "", str(s or ""))
+
 
 @dataclass
 class ExecResult:
@@ -55,7 +66,9 @@ def screen_fingerprint(img: Image.Image) -> int:
     w, h = img.size
     top = int(h * SCREEN_FP_STATUS_BAR)
     small = img.crop((0, top, w, h)).convert("L").resize((SCREEN_FP_SIZE, SCREEN_FP_SIZE))
-    px = list(small.getdata())
+    # L 模式每像素 1 字节，tobytes() 直接拿到灰度值序列（比 getdata() 快，
+    # 且避开 Pillow 的 getdata 弃用警告）。
+    px = small.tobytes()
     avg = sum(px) / len(px)
     bits = 0
     for i, v in enumerate(px):
@@ -78,7 +91,7 @@ def is_blank_frame(img: Image.Image) -> bool:
       检出后由调用方**停下问人工**（不自动解锁 —— 解锁要密码，不该代做）。
     """
     small = img.convert("L").resize((64, 64))
-    px = list(small.getdata())
+    px = small.tobytes()                    # L 模式：每像素 1 字节
     dark = sum(1 for v in px if v < BLANK_FRAME_LEVEL)
     return dark >= BLANK_FRAME_RATIO * len(px)
 
@@ -446,7 +459,16 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
                 print("[注意] 界面不暴露聚焦输入框，无法回读验证 —— "
                       "这一句是否真的上屏请人工确认")
                 return ExecResult(True, f"输入「{safe}」（未能回读验证）")
-            if text in now or (last_before is not None and now != last_before):
+            # ★ 成功判据收紧（2026-10-05，mimo 审查 P1-1）：旧写法第二句是
+            #   「只要输入框内容变了就算成功」—— 于是**被 maxlength 截断**、
+            #   或只打出前几个字，都会判成功，模型据此 COMPLETE → 发出半截消息。
+            #   现在额外要求「框里的字数不少于我们输入的字数」：
+            #     · 自动格式化（138 1234 5678）-> 归一化后仍包含、长度只多不少 ✓
+            #     · 截断 / 部分上屏        -> 长度不足 -> 判失败，走重试 ✓
+            norm_text, norm_now = _norm(text), _norm(now)
+            if (norm_text in norm_now
+                    or (last_before is not None and now != last_before
+                        and len(norm_now) >= len(norm_text))):
                 if attempt > 1:
                     return ExecResult(True, f"输入「{safe}」（第 {attempt} 次才成功）")
                 return ExecResult(True, f"输入「{safe}」")

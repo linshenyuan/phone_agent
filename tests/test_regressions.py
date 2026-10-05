@@ -283,5 +283,82 @@ class TYPE清空上限(unittest.TestCase):
         self.assertGreater(TYPE_CLEAR_MAX, 20)
 
 
+class 坐标dict缺xy(unittest.TestCase):
+    """★ mimo P2：缺 x/y 旧写法会静默变 (0,0) —— 点屏幕左上角。"""
+
+    def test_缺x或y一律拒绝(self):
+        for bad in ({"x": 5}, {"y": 5}, {}):
+            with self.assertRaises(InvalidActionError):
+                normalize_action({"action_type": "CLICK", "point": bad})
+
+    def test_齐全时正常(self):
+        out = normalize_action({"action_type": "CLICK", "point": {"x": 5, "y": 6}})
+        self.assertEqual(out["point"], (5.0, 6.0))
+
+
+class 黑屏阈值(unittest.TestCase):
+    """★ mimo P1-4：阈值 20 会把深色主题背景 #121212(灰度18) 当黑屏。"""
+
+    def test_深色主题不再误判(self):
+        from phone_agent.actions import is_blank_frame
+        from fakes import FakeImage
+        self.assertFalse(is_blank_frame(FakeImage(color=(18, 18, 18))),
+                         "#121212 是深色主题背景，不该算黑屏")
+
+    def test_纯黑仍能命中(self):
+        from phone_agent.actions import is_blank_frame
+        from fakes import FakeImage
+        self.assertTrue(is_blank_frame(FakeImage(color=(0, 0, 0))))
+
+
+class 清理只删自己的图(unittest.TestCase):
+    """★ mimo P2：prune_tmp 原来 glob('*.png') 会删掉用户自己放进 tmp/ 的图。"""
+
+    def test_用户自己的png不被删(self):
+        tmp = Path(tempfile.mkdtemp(prefix="pa_prune_"))
+        try:
+            (tmp / "用户自己的图.png").write_bytes(b"x")
+            for i in range(3):
+                p = tmp / f"complete_step{i}.png"
+                p.write_bytes(b"x")
+                os.utime(p, (1000 + i, 1000 + i))       # 让 mtime 有序
+            with mock.patch.object(output, "TMP_DIR", tmp):
+                output.prune_tmp(keep=1)
+            self.assertTrue((tmp / "用户自己的图.png").exists(), "用户自己的图被删了")
+            self.assertTrue((tmp / "complete_step2.png").exists(), "最新一张应保留")
+            self.assertFalse((tmp / "complete_step0.png").exists())
+        finally:
+            for p in tmp.glob("*"):
+                p.unlink()
+            tmp.rmdir()
+
+
+class TYPE成功判据(unittest.TestCase):
+    """★ mimo P1-1：旧写法「框变了就算成功」→ 截断/部分上屏也判成功。"""
+
+    def _run_type(self, box_text):
+        from phone_agent import actions as A
+        with mock.patch.object(A, "focus_editable_box",
+                               lambda *a, **k: (True, "ok", "旧内容", False, False)), \
+                mock.patch.object(A, "read_focused_text", lambda *a, **k: box_text), \
+                mock.patch.object(A, "input_text", lambda *a, **k: None), \
+                mock.patch.object(A, "adb", lambda *a, **k: ""), \
+                mock.patch.object(A, "time", mock.MagicMock()):
+            return A.execute_action({"action_type": "TYPE", "value": "你好世界"},
+                                    (1080, 2408), None, True, False)
+
+    def test_完整上屏判成功(self):
+        self.assertTrue(self._run_type("你好世界").ok)
+
+    def test_部分上屏判失败(self):
+        # 只打出前两个字：框确实变了，但内容不全 —— 不该算成功
+        self.assertFalse(self._run_type("你好").ok,
+                         "部分上屏不该算成功（模型会据此 COMPLETE 发半截消息）")
+
+    def test_自动插空格仍判成功(self):
+        # 手机号/金额类字段会自动插空格，归一化后仍应判成功
+        self.assertTrue(self._run_type("你好 世界").ok)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

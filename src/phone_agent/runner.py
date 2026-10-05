@@ -41,6 +41,24 @@ def _adb_fail(step: str, exc: AdbError) -> int:
     return 1
 
 
+def _conclude(exit_code: int, headline: str, hint: str = "") -> int:
+    """
+    退出前的统一收尾 —— **必须**打出 `[结论]` 行。
+
+    ★ 为什么（2026-10-05，mimo 审查 P1-6）：调用方（尤其是 LLM）往往**只读尾部**；
+      缺了 `[结论]` 行，它会照着退出码自己编原因 —— 2026-09-30 已经吃过一次，
+      一次**成功**的任务被说成失败，还编了个「该文件夹不存在」的假理由。
+      所以每条退出路径都要把「是什么 / 不是什么」写清楚。
+    """
+    print(f"\n{'=' * 56}")
+    print(headline)
+    if hint:
+        print(f"       说明：{hint}")
+    print(f"[结论] 任务【未完成】—— 退出码 {exit_code}")
+    print("=" * 56)
+    return exit_code
+
+
 def _for_log(action: dict[str, Any]) -> dict[str, Any]:
     """打日志用的动作副本：TYPE 的正文脱敏（日志会落盘，不该记明文）。"""
     if str(action.get("action_type", "")).upper() != "TYPE":
@@ -59,12 +77,18 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
 
     :return: 进程退出码，0 表示任务完成，1 表示未完成或出错
     """
-    try:
-        has_yadb = ensure_yadb(device, verbose=not dry_run)
-    except AdbError as exc:
-        return _adb_fail("连接设备（ensure_yadb）", exc)
+    # ★ dry-run 必须**完全不碰手机**（2026-10-05，mimo 审查 P1-2）：
+    #   旧实现把 ensure_yadb 放在这个判断**之前**，它会真的往手机 push yadb ——
+    #   于是 README 里吹的「确认闸门」并不干净。现在 dry-run 直接跳过。
     if dry_run:
         info("[dry-run] 只做决策，不会真的操作手机\n")
+        info("[dry-run] 跳过 yadb 部署（不往手机 push 任何文件）")
+        has_yadb = False
+    else:
+        try:
+            has_yadb = ensure_yadb(device, verbose=True)
+        except AdbError as exc:
+            return _adb_fail("连接设备（ensure_yadb）", exc)
 
     # ★ 执行前复位：把手机推回桌面，保证起点可复现。
     #   不做的话，起点就是上一轮的终点 —— 实测导致过 1 步假成功。
@@ -173,8 +197,8 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
         try:
             action = ask_model(client, model, view_img, task, history)
         except Exception as exc:
-            print(f"[错误] 模型调用失败：{exc}")
-            return 1
+            return _conclude(1, f"[错误] 模型调用失败：{exc}",
+                             "模型服务无响应或报错，**不是任务本身失败**")
 
         # ★ 日志脱敏（2026-10-05，Claude 审查 B4）：TYPE 的正文可能是密码/私密消息，
         #   而日志会落盘长期保留。注意 history 里仍存**原文**（模型要看到自己输过什么）。
@@ -203,11 +227,9 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
                                     click_checked=click_checked,
                                     screen_fp=screen_fp)
         if stuck_reason:
-            print(f"\n{'=' * 56}")
-            print(f"[卡死] 第 {step} 步判定为原地打转，提前终止")
-            print(f"原因：{stuck_reason}")
-            print("=" * 56)
-            return 2
+            return _conclude(
+                2, f"[卡死] 第 {step} 步判定为原地打转，提前终止",
+                f"原因：{stuck_reason}；脚本**主动终止**，不是模型判断失误")
 
         # 拦截：不终止任务，只跳过这一步，让模型换别的手段。
         #   * 连续 TYPE —— 模型点不中发送按钮时会反复追加文字，退化成 200 字乱码
@@ -290,8 +312,8 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
             res = execute_action(action, real_img.size, device, has_yadb, dry_run,
                                  prefer_point=prefer_point)
         except AdbError as exc:
-            print(f"[错误] 执行失败：{exc}")
-            return 1
+            return _conclude(1, f"[错误] 执行失败：{exc}",
+                             "adb 出错（多半是掉线 / 拔线），**不是模型判断失误**")
 
         info(f"执行结果：{res.note}")
         # ★ 失败也要进历史（2026-10-05 改）：旧写法无论成败都塞原始动作，
@@ -313,10 +335,9 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
             print("[警告] 动作无法执行，继续下一步尝试别的策略")
             # 输入彻底失败（重试也没上屏）是硬伤，继续跑必然是空转，直接收工
             if action.get("action_type") == "TYPE":
-                print(f"\n{'=' * 56}")
-                print("[终止] 文字输入无法完成，后续步骤只会重复尝试，提前结束")
-                print("=" * 56)
-                return 2
+                return _conclude(
+                    2, "[终止] 文字输入无法完成，后续步骤只会重复尝试，提前结束",
+                    "输入反复没上屏（可能是输入法或界面问题）")
             # ★ 连续 OPEN 失败到上限 -> 停下问用户是哪个应用（#3，2026-10-05）
             if str(action.get("action_type", "")).upper() == "OPEN":
                 open_fail_streak += 1
@@ -346,8 +367,9 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
             # 退出码还是 0，调用方会以为成功了。这类「假成功」比空转更危险。
             suspects: list[str] = []
 
-            did_type = any(h.get("action_type") in ("TYPE", "BLOCKED_TYPE")
-                           for h in history)
+            # ★ 被拦的 TYPE **不算**「打过字」（2026-10-05，mimo 审查 P2）：
+            #   它根本没执行，算进去会掩盖「全程没打字却喊完成」的假成功。
+            did_type = any(h.get("action_type") == "TYPE" for h in history)
             if not did_type and _looks_like_text_task(task):
                 suspects.append("任务要求发文字，但整个过程一次 TYPE 都没执行过")
 
@@ -400,5 +422,5 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
 
         time.sleep(step_delay)
 
-    print(f"\n[结束] 达到最大步数 {max_steps} 仍未完成，任务可能失败了")
-    return 1
+    return _conclude(1, f"[结束] 达到最大步数 {max_steps} 仍未完成",
+                     "步数耗尽，任务没做完（可加大 --max-steps，或把任务拆小）")
