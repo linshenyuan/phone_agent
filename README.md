@@ -198,16 +198,16 @@ my_project/
 ├── bin/
 │   └── yadb                    中文输入用的二进制（必需，随仓库分发）
 ├── src/phone_agent/
-│   ├── config.py       334 行   所有常量 + _PROJECT_ROOT
+│   ├── config.py       337 行   所有常量 + _PROJECT_ROOT
 │   ├── deps.py          15 行   第三方依赖统一导入
-│   ├── output.py       213 行   输出控制 + 日志/截图清理
+│   ├── output.py       216 行   输出控制 + 日志/截图清理
 │   ├── adb.py          259 行   ADB 基础（命令/设备/截图/点击/滑动/按键）
 │   ├── apps.py         394 行   App 操作（包名解析/启动/复位/中文输入）
 │   ├── ui.py           354 行   界面树解析（dump/节点/输入框/可见文字）
-│   ├── vision.py       593 行   模型交互（提示词/解析/请求重试）
+│   ├── vision.py       598 行   模型交互（提示词/解析/请求重试）
 │   ├── tasks.py        181 行   任务判定（纯打开/简单任务/发文字）
-│   ├── actions.py      551 行   动作执行 + 卡死检测
-│   ├── runner.py       404 行   主循环
+│   ├── actions.py      573 行   动作执行 + 卡死检测
+│   ├── runner.py       426 行   主循环
 │   └── phone_agent.py  166 行   命令行入口
 ├── tests/                      离线测试（标准库 unittest，不碰真机/模型）
 │   ├── fakes.py                假件与打桩工具
