@@ -13,7 +13,8 @@ from .apps import current_package, detect_app_in_task, ensure_yadb, launch_app, 
 from .config import (APP_ALIASES_FILE, BLANK_FRAME_MAX, TMP_DIR, EXIT_NEED_HUMAN,
                      MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, OPEN_FAIL_STREAK_MAX)
 from .output import info, prune_tmp, redact_text
-from .tasks import _is_pure_open_task, _is_trivial_task, _looks_like_text_task
+from .tasks import (_is_pure_open_task, _is_trivial_task, _looks_like_text_task,
+                    _password_prompt_hit, _task_may_need_password)
 from .ui import point_hits_editable, read_focused_text, visible_texts
 from .vision import ask_model, parse_point, resize_for_model
 from .deps import OpenAI
@@ -57,6 +58,27 @@ def _conclude(exit_code: int, headline: str, hint: str = "") -> int:
     print(f"[结论] 任务【未完成】—— 退出码 {exit_code}")
     print("=" * 56)
     return exit_code
+
+
+def _password_guard_reason(task: str, device: str | None) -> str:
+    """
+    这次 TYPE 是不是「可能在输密码」。返回原因文字；不涉及则返回空串。
+
+    ★ 两层判据（2026-10-05，Claude B5 / mimo P1-3）：
+      甲：任务文本里明确写了密码/验证码 —— 零成本，误判率低
+      乙：屏幕上出现「请输入密码」这类提示 —— 需要一次 dump（约 1.7 秒）
+
+    ★ 为什么不直接「识别密码框」：WebView 的 `<input type="password">` 和
+      Flutter 的 `obscureText` 输入框在 `uiautomator dump` 里**根本不存在**
+      （没有 EditText 节点、也不带 password 属性）。而密码一旦被代输，
+      就是**真的交给了 App** —— 只能靠这两层间接判据提前拦下。
+    """
+    if _task_may_need_password(task):
+        return f"任务里提到了密码/验证码（「{task}」）—— 脚本不代输密码"
+    hit = _password_prompt_hit(visible_texts(device))
+    if hit:
+        return f"当前屏幕上出现「{hit}」—— 很可能正在要求输入密码/验证码"
+    return ""
 
 
 def _for_log(action: dict[str, Any]) -> dict[str, Any]:
@@ -308,6 +330,20 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
                         if prev_action is not None
                         and str(prev_action.get("action_type", "")).upper() == "CLICK"
                         else None)
+        # ★ 密码防护（2026-10-05）：任何 TYPE 之前先确认「这不是在输密码」。
+        #   挡不住的话，密码会被真的输进 App，而且 Flutter 场景还会被判成成功。
+        if not dry_run and str(action.get("action_type", "")).upper() == "TYPE":
+            why = _password_guard_reason(task, device)
+            if why:
+                report_need_human(
+                    device, real_img, step, why,
+                    headline="[涉及密码，请人工输入]",
+                    conclusion=(
+                        f"[结论] 任务【未完成】—— 退出码 {EXIT_NEED_HUMAN} = "
+                        f"需要人工输入密码/验证码，**不是脚本失败**\n"
+                        f"       脚本已停在原处，请人工输完后再重新发起任务。"))
+                return EXIT_NEED_HUMAN
+
         try:
             res = execute_action(action, real_img.size, device, has_yadb, dry_run,
                                  prefer_point=prefer_point)

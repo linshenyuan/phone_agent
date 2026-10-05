@@ -223,5 +223,29 @@ class dry_run不碰手机(unittest.TestCase):
         self.assertIn("dry-run", h.output)
 
 
+class 密码防护(unittest.TestCase):
+    """★ Claude B5 / mimo P1-3：WebView/Flutter 的密码框读不到，靠「任务文本 + 界面提示」拦。"""
+
+    def test_甲_任务提到密码就停下(self):
+        with runner_env([TYPE("abc123")], texts=[]) as h:
+            rc = run_task("登录淘宝，密码是abc123", max_steps=3)
+        self.assertEqual(rc, 4, "任务提到密码时应停下问人工")
+        self.assertTrue(h.report_calls)
+        self.assertEqual(len(h.exec_calls), 0, "**不该真的把密码输进去**")
+
+    def test_乙_界面提示输密码就停下(self):
+        with runner_env([TYPE("abc123")], texts=["请输入密码", "登录"]) as h:
+            rc = run_task("打开淘宝", max_steps=3)
+        self.assertEqual(rc, 4, "屏幕提示输密码时应停下问人工")
+        self.assertEqual(len(h.exec_calls), 0, "**不该真的把密码输进去**")
+
+    def test_正常任务不受影响(self):
+        with runner_env([TYPE("你好"), COMPLETE], texts=["聊天", "发送"]) as h:
+            rc = run_task("打开设置", max_steps=3)
+        self.assertEqual(len(h.exec_calls), 2, "正常任务不该被误拦")
+        self.assertFalse(h.report_calls)
+        self.assertEqual(rc, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

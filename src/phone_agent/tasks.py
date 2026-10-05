@@ -179,3 +179,43 @@ _SAY_FALSE_POSITIVES = (
 _TEXT_FALSE_POSITIVES = (
     "输入法", "搜索引擎", "搜索框",
 )
+
+
+# ============================================================
+# 密码防护（2026-10-05 加，Claude B5 / mimo P1-3）
+# ============================================================
+# ★ 为什么靠「任务文本 + 界面提示」而不是「识别密码框」：
+#   WebView 的 `<input type="password">` 与 Flutter 的 `obscureText` 输入框
+#   在 `uiautomator dump` 里**根本不存在**（既没有 EditText 节点，也不带
+#   password 属性）—— 界面判不出来。而密码一旦被代输，就是真的交给了 App。
+#
+# 甲：任务里明确提到这些词 -> 任何 TYPE 前先停下问人工。
+#   刻意**不含**「登录/账号」：任务里写「登录一下」太常见，拦了会误伤正常任务；
+#   那种情况交给下面的「乙」按界面提示判断。
+_PASSWORD_TASK_KEYS = ("密码", "验证码", "口令", "pin码")
+
+# 乙：屏幕上出现这些**明确要你输密码**的提示 -> 同样停下。
+#   刻意不含单独的「密码」二字：「修改密码」「忘记密码」这类入口不是输入框。
+_PASSWORD_PROMPT_KEYS = (
+    "请输入密码", "输入密码", "请输入登录密码", "请输入支付密码",
+    "请输入验证码", "输入验证码", "密码错误", "验证码错误",
+)
+
+
+def _task_may_need_password(task: str) -> bool:
+    """任务文本里是不是明确提到了密码/验证码。"""
+    t = task or ""
+    return any(k in t for k in _PASSWORD_TASK_KEYS)
+
+
+def _password_prompt_hit(texts: list[str]) -> str:
+    """
+    屏幕文字里有没有「要你输密码」的提示。
+
+    :return: 命中的那条文字；没命中返回空串
+    """
+    for t in texts or []:
+        for k in _PASSWORD_PROMPT_KEYS:
+            if k in t:
+                return t
+    return ""
