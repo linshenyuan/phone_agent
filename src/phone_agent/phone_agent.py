@@ -63,8 +63,11 @@ def main() -> int:
     parser.add_argument("--no-reset", action="store_true",
                         help="跳过执行前的回桌面复位（默认会复位，保证起点可复现）")
     parser.add_argument("--no-auto-launch", action="store_true",
-                        help="不复位后自动启动任务里提到的 App。默认会启动 —— "
-                             "本机桌面是自绘界面读不到图标，从桌面起步基本走不通")
+                        help="不复位后自动启动任务里提到的 App。默认会启动，"
+                             "但**只对「纯打开」类任务生效**（如「打开设置」）—— "
+                             "本机桌面是自绘界面读不到图标，从桌面起步基本走不通；"
+                             "带别的要求的任务（如「打开微信发消息」）不自动启动，"
+                             "交给模型自己输出 OPEN")
     parser.add_argument("--reset-app", default=None, metavar="包名",
                         help="复位时额外强制停止这个 App（如 com.tencent.mobileqq）。"
                              "默认只按 Home 不强杀，因为强杀会中断后台收消息")

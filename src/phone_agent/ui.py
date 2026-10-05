@@ -240,7 +240,8 @@ def _pick_editable(nodes: list[dict[str, Any]],
 
 def focus_editable_box(device: str | None = None,
                        prefer_point: tuple[float, float] | None = None,
-                       verbose: bool = True) -> tuple[bool, str, str | None, bool]:
+                       verbose: bool = True
+                       ) -> tuple[bool, str, str | None, bool, bool]:
     """
     ★ 方案 A（2026-09-30 加）：TYPE 之前先确保有一个**聚焦**的输入框。
 

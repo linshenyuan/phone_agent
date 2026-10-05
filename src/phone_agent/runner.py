@@ -11,7 +11,7 @@ from .adb import AdbError, screenshot
 from .apps import current_package, detect_app_in_task, ensure_yadb, launch_app, reset_to_home
 from .config import (APP_ALIASES_FILE, TMP_DIR, EXIT_NEED_HUMAN,
                      MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, OPEN_FAIL_STREAK_MAX)
-from .output import info, prune_tmp
+from .output import info, prune_tmp, redact_text
 from .tasks import _is_pure_open_task, _is_trivial_task, _looks_like_text_task
 from .ui import point_hits_editable, visible_texts
 from .vision import ask_model, parse_point, resize_for_model
@@ -23,6 +23,32 @@ from .deps import OpenAI
 # 主循环
 # ============================================================
 
+def _adb_fail(step: str, exc: AdbError) -> int:
+    """
+    adb 类异常的统一收尾 —— **必须**留下 `[结论]` 行。
+
+    ★ 为什么需要（2026-10-05，Claude 审查 B2）：`ensure_yadb` / `reset_to_home` /
+      `screenshot` 原本都没被包住 —— 拔线或 adb 掉线时直接抛 traceback，
+      调用方（尤其是 LLM）拿不到它赖以判断的 `[结论]` 行，只能自己瞎解释，
+      甚至编一个与事实无关的原因回给用户（这个坑 2026-09-30 已经吃过一次）。
+    """
+    print(f"\n{'=' * 56}")
+    print(f"[错误] {step} 失败：{exc}")
+    print("[结论] 任务【未完成】—— 退出码 1 = adb 出错（多半是掉线 / 拔线），"
+          "**不是模型判断失误**")
+    print("=" * 56)
+    return 1
+
+
+def _for_log(action: dict[str, Any]) -> dict[str, Any]:
+    """打日志用的动作副本：TYPE 的正文脱敏（日志会落盘，不该记明文）。"""
+    if str(action.get("action_type", "")).upper() != "TYPE":
+        return action
+    out = dict(action)
+    out["value"] = redact_text(out.get("value", ""))
+    return out
+
+
 def run(task: str, device: str | None, client: OpenAI, model: str,
         view_width: int, max_steps: int, step_delay: float,
         dry_run: bool = False, reset_app: str | None = None,
@@ -32,7 +58,10 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
 
     :return: 进程退出码，0 表示任务完成，1 表示未完成或出错
     """
-    has_yadb = ensure_yadb(device, verbose=not dry_run)
+    try:
+        has_yadb = ensure_yadb(device, verbose=not dry_run)
+    except AdbError as exc:
+        return _adb_fail("连接设备（ensure_yadb）", exc)
     if dry_run:
         info("[dry-run] 只做决策，不会真的操作手机\n")
 
@@ -43,10 +72,16 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
     elif dry_run:
         info("[dry-run] 跳过复位（不操作手机）")
     else:
-        reset_to_home(device, kill_package=reset_app)
+        try:
+            reset_to_home(device, kill_package=reset_app)
+        except AdbError as exc:
+            return _adb_fail("复位到桌面（reset_to_home）", exc)
 
     # 起点基线：记下开始时的前台包名，完成时用来判断「到底有没有离开过起点」
-    baseline_pkg = current_package(device)
+    try:
+        baseline_pkg = current_package(device)
+    except AdbError as exc:
+        return _adb_fail("读取当前前台应用", exc)
     info(f"[起点] 前台应用：{baseline_pkg or '未知'}")
 
     # ★ 方案A：任务里点名了某个 App 时，直接用 adb 把它拉起来，**绕开桌面**。
@@ -92,7 +127,10 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
     open_fail_streak = 0
 
     for step in range(1, max_steps + 1):
-        real_img = screenshot(device)
+        try:
+            real_img = screenshot(device)
+        except AdbError as exc:
+            return _adb_fail(f"第 {step} 步截图", exc)
         view_img = resize_for_model(real_img, view_width)
 
         # 卡死检测器按真实屏幕尺寸构造，容差用像素算、比较用归一化坐标
@@ -110,7 +148,9 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
             print(f"[错误] 模型调用失败：{exc}")
             return 1
 
-        info(f"模型决策：{json.dumps(action, ensure_ascii=False)}")
+        # ★ 日志脱敏（2026-10-05，Claude 审查 B4）：TYPE 的正文可能是密码/私密消息，
+        #   而日志会落盘长期保留。注意 history 里仍存**原文**（模型要看到自己输过什么）。
+        info(f"模型决策：{json.dumps(_for_log(action), ensure_ascii=False)}")
 
         # ★ 连续 TYPE 保护的新判据（2026-10-04 改）：只有「上一步真的点在输入框上」
         #   才清零计数。判断方式 = 读界面树看这个坐标有没有压住 EditText，
@@ -169,7 +209,7 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
                      f"  屏幕={real_img.width}x{real_img.height}")
                 history.append({"action_type": "BLOCKED_SLIDE", "value": ""})
             else:
-                note = (f"[已拦截] 这一步 TYPE「{action.get('value', '')}」未执行："
+                note = (f"[已拦截] 这一步 TYPE「{redact_text(action.get('value', ''))}」未执行："
                         f"输入框里已有内容，再输入会连成一串。"
                         f"请改为点击发送按钮 —— 自己看截图找，"
                         f"它是负责把输入框内容发出去的那个控件，通常紧挨着输入框。")

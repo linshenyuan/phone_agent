@@ -26,9 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))     # 让 `import fakes
 from fakes import alias_env                                   # noqa: E402
 
 from phone_agent import output                                # noqa: E402
-from phone_agent.adb import pick_device                       # noqa: E402
+from phone_agent.adb import AdbError, pick_device             # noqa: E402
 from phone_agent.apps import resolve_package                  # noqa: E402
-from phone_agent.config import DURATION_MAX, DURATION_MIN     # noqa: E402
+from phone_agent.config import (DURATION_MAX, DURATION_MIN,   # noqa: E402
+                                TYPE_CLEAR_MAX)
+from phone_agent.output import redact_text                    # noqa: E402
 from phone_agent.tasks import (_looks_like_text_task,         # noqa: E402
                                _is_pure_open_task)
 from phone_agent.vision import (InvalidActionError,           # noqa: E402
@@ -230,6 +232,55 @@ class 多设备不静默挑第一台(unittest.TestCase):
         import phone_agent.adb as adb_mod
         with mock.patch.object(adb_mod, "list_devices", return_value=["only"]):
             self.assertEqual(pick_device(None), "only")
+
+
+class 日志脱敏(unittest.TestCase):
+    def test_短文本整体打码(self):
+        self.assertEqual(redact_text("你好"), "＊＊")
+        self.assertEqual(redact_text(""), "")
+
+    def test_长文本只留开头和长度(self):
+        out = redact_text("我的密码是12345")
+        self.assertTrue(out.startswith("我的"))
+        self.assertIn("共", out)
+        self.assertNotIn("12345", out, "正文不能出现在脱敏结果里")
+
+    def test_动作日志副本脱敏(self):
+        from phone_agent.runner import _for_log
+        a = {"action_type": "TYPE", "value": "秘密口令"}
+        self.assertNotIn("秘密口令", str(_for_log(a)))
+
+    def test_非TYPE动作原样返回(self):
+        from phone_agent.runner import _for_log
+        c = {"action_type": "CLICK", "point": (1, 2)}
+        self.assertEqual(_for_log(c), c)
+
+    def test_脱敏不改原dict(self):
+        # ★ 喂给模型的历史必须保留原文（模型要知道自己输过什么）
+        from phone_agent.runner import _for_log
+        a = {"action_type": "TYPE", "value": "秘密口令"}
+        _for_log(a)
+        self.assertEqual(a["value"], "秘密口令")
+
+
+class adb异常留结论行(unittest.TestCase):
+    def test_打印结论并返回1(self):
+        import contextlib
+        import io
+        from phone_agent.runner import _adb_fail
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = _adb_fail("截图", AdbError("device offline"))
+        self.assertEqual(rc, 1)
+        self.assertIn("[结论]", buf.getvalue(), "adb 出错也必须留结论行")
+        self.assertIn("device offline", buf.getvalue())
+
+
+class TYPE清空上限(unittest.TestCase):
+    def test_上限远高于20(self):
+        # ★ Claude 审查 B1：旧实现固定只清 20 个字符 —— 长消息清不干净，
+        #   残留会被下一次重试**追加**在后面（还是半截 + 拼错）
+        self.assertGreater(TYPE_CLEAR_MAX, 20)
 
 
 if __name__ == "__main__":

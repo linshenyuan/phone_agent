@@ -170,6 +170,25 @@ def setup_log(log_file: str | None = None, no_log: bool = False,
     print(f"[日志] 完整日志：{_log_handle.name}")
 
 
+def redact_text(text: Any, keep: int = 2) -> str:
+    """
+    日志脱敏：只保留开头 `keep` 个字 + 总长度，短文本整体打码。
+
+    ★ 为什么需要（2026-10-05，Claude 审查）：TYPE 的正文可能是**密码、验证码、
+      私密消息**，而日志会落盘并长期保留（`log/run_*.log`）。旧实现把正文原样
+      写进日志，等于明文留档。
+
+    ★ 只用于**打日志**：喂给模型的 history 必须保留原文 ——
+      模型要看到自己输过什么，否则会重复输入。
+    """
+    s = str(text or "")
+    if not s:
+        return ""
+    if len(s) <= keep:
+        return "＊" * len(s)
+    return f"{s[:keep]}…（共 {len(s)} 字）"
+
+
 def prune_tmp(keep: int | None = None) -> None:
     """
     清理 tmp/ 里的旧截图，只留最近 N 张。

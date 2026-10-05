@@ -8,8 +8,8 @@ from typing import Any
 
 from .adb import AdbError, adb, keyevent, swipe, tap
 from .apps import current_package, input_text, launch_app
-from .config import TMP_DIR, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, EXIT_NEED_HUMAN, MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, STUCK_POSITION_TOLERANCE_PX, STUCK_REPEAT_THRESHOLD, STUCK_SLIDE_REPEAT_THRESHOLD, STUCK_TYPE_REPEAT_THRESHOLD, STUCK_WINDOW, TYPE_RETRY, TYPE_VERIFY_DELAY, WAIT_SECONDS_DEFAULT, WAIT_SECONDS_MAX
-from .output import info, prune_tmp
+from .config import TMP_DIR, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, EXIT_NEED_HUMAN, MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, STUCK_POSITION_TOLERANCE_PX, STUCK_REPEAT_THRESHOLD, STUCK_SLIDE_REPEAT_THRESHOLD, STUCK_TYPE_REPEAT_THRESHOLD, STUCK_WINDOW, TYPE_CLEAR_MAX, TYPE_RETRY, TYPE_VERIFY_DELAY, WAIT_SECONDS_DEFAULT, WAIT_SECONDS_MAX
+from .output import info, prune_tmp, redact_text
 from .ui import focus_editable_box, read_focused_text
 from .vision import parse_point
 from .deps import Image
@@ -56,11 +56,14 @@ class StuckDetector:
          而「点输入框 -> 输字 -> 点输入框 -> 输字」正是最典型的空转形态；
       3. 只 print 警告，不做任何干预 -> 该空转还是空转。
 
-    这一版：按**归一化距离容差**归并（容差换算成像素后约 30px），
-    三类动作各自独立计数，互不清零；命中就由调用方终止任务。
+    这一版：按**归一化距离容差**归并，三类动作各自独立计数，互不清零；
+    命中就由调用方终止任务。
 
-    归一化容差 = STUCK_POSITION_TOLERANCE_PX / 屏幕长边像素 * 1000，
-    这样 1080x2408 和别的分辨率都能用同一套阈值。
+    ★ 容差怎么换算（2026-10-05 澄清，Claude 审查 D1）：
+      归一化容差 = STUCK_POSITION_TOLERANCE_PX / **屏幕长边像素** × 1000，
+      **横竖用同一个归一化数**。所以在 1080×2408 上：
+        纵向 ≈ 30px；横向 ≈ 13px（同一归一化值乘横向像素密度）
+      —— 旧注释笼统写「换算成像素后约 30px」，**只对纵向成立**，不准。
     """
 
     def __init__(self, real_w: int, real_h: int) -> None:
@@ -184,7 +187,7 @@ class StuckDetector:
                 elif (len(self.types) >= STUCK_TYPE_REPEAT_THRESHOLD
                         and len(set(self.types)) == 1):
                     return (f"连续 {STUCK_TYPE_REPEAT_THRESHOLD} 次输入同一段文字"
-                            f"「{text}」仍未推进 —— 输入很可能没真正上屏"
+                            f"「{redact_text(text)}」仍未推进 —— 输入很可能没真正上屏"
                             f"（yadb 静默失败的典型症状）")
 
         elif name == "SLIDE":
@@ -304,8 +307,12 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
 
     if name == "TYPE":
         text = str(action.get("value", ""))
+        # ★ 日志里只写**脱敏后**的正文（2026-10-05，Claude 审查 B4）：
+        #   下面的 ExecResult.note 会被 runner 打进日志文件，而正文可能是
+        #   密码 / 验证码 / 私密消息。喂给模型的 history 仍用原文（见 runner）。
+        safe = redact_text(text)
         if dry_run:
-            return ExecResult(True, f"输入「{text}」")
+            return ExecResult(True, f"输入「{safe}」")
 
         # ★ 方案 A（2026-09-30 加）：先确保输入框聚焦，再打字。
         #   实测踩坑：模型点了两下别的地方就直接 TYPE，输入框没聚焦，
@@ -350,11 +357,11 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
                 # —— 无法验证，不误报失败，直接放行，但把话说清楚让人工去核对。
                 print("[注意] 界面不暴露聚焦输入框，无法回读验证 —— "
                       "这一句是否真的上屏请人工确认")
-                return ExecResult(True, f"输入「{text}」（未能回读验证）")
+                return ExecResult(True, f"输入「{safe}」（未能回读验证）")
             if text in now or (last_before is not None and now != last_before):
                 if attempt > 1:
-                    return ExecResult(True, f"输入「{text}」（第 {attempt} 次才成功）")
-                return ExecResult(True, f"输入「{text}」")
+                    return ExecResult(True, f"输入「{safe}」（第 {attempt} 次才成功）")
+                return ExecResult(True, f"输入「{safe}」")
 
             # 没生效。先清掉输入框里可能挡路的残字再重试。
             info(f"[警告] TYPE 第 {attempt} 次没生效（输入框仍是「{now}」）")
@@ -365,12 +372,17 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
             #   用 now != last_before 判断，语义正好是「这框里确实多了东西」。
             if attempt < TYPE_RETRY and now and now != last_before:
                 adb("shell", "input", "keyevent", "123", device=device)  # MOVE_END
-                for _ in range(min(len(now), 20)):
-                    adb("shell", "input", "keyevent", "67", device=device)  # DEL
+                # ★ 按实际长度清，且**一次调用带多个 keycode**（2026-10-05 修）：
+                #   旧实现固定只发 20 个退格 —— 超过 20 字的消息清不干净，
+                #   残留会被下一次重试**追加**在后面（还是半截 + 拼错）。
+                #   `input keyevent` 支持一次传多个 keycode，批量发比逐个发快得多。
+                n = min(len(now), TYPE_CLEAR_MAX)
+                if n:
+                    adb("shell", "input", "keyevent", *(["67"] * n), device=device)  # DEL × n
                 time.sleep(0.3)
                 last_before = read_focused_text(device)
 
-        return ExecResult(False, f"输入「{text}」连续 {TYPE_RETRY} 次都没上屏，已放弃")
+        return ExecResult(False, f"输入「{safe}」连续 {TYPE_RETRY} 次都没上屏，已放弃")
 
     if name == "BACK":
         if not dry_run:
