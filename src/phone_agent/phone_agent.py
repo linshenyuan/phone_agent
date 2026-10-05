@@ -113,7 +113,7 @@ def main() -> int:
                         http_client=build_http_client())
 
         # ★ 下面这些「本地 llama-server 专属」的兜底**只在回环端点启用**（2026-10-05 修）。
-        #   云端场景下它们全是错的（Claude 审查 #5）：
+        #   云端场景下它们全是错的：
         #     · `/models` 失败即致命 —— 可不少 OpenAI 兼容服务并不实现 /models
         #     · 静默切到 available[0] —— 在云端那是「任意一个模型」（可能是
         #       embedding 模型、或更贵的模型），而且**会收到你的截图**

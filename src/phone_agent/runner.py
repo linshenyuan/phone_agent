@@ -25,14 +25,16 @@ from .deps import OpenAI
 # 主循环
 # ============================================================
 
-def _adb_fail(step: str, exc: AdbError) -> int:
+def _adb_fail(step: str, exc: Exception) -> int:
     """
     adb 类异常的统一收尾 —— **必须**留下 `[结论]` 行。
 
-    ★ 为什么需要（2026-10-05，Claude 审查 B2）：`ensure_yadb` / `reset_to_home` /
+    ★ 为什么需要（2026-10-05）：`ensure_yadb` / `reset_to_home` /
       `screenshot` 原本都没被包住 —— 拔线或 adb 掉线时直接抛 traceback，
       调用方（尤其是 LLM）拿不到它赖以判断的 `[结论]` 行，只能自己瞎解释，
       甚至编一个与事实无关的原因回给用户（这个坑 2026-09-30 已经吃过一次）。
+    ★ 参数类型放宽为 Exception（2026-10-05）：截图损坏时是 OSError 而非 AdbError，
+      同样需要走这条统一收尾。
     """
     print(f"\n{'=' * 56}")
     print(f"[错误] {step} 失败：{exc}")
@@ -46,7 +48,7 @@ def _conclude(exit_code: int, headline: str, hint: str = "") -> int:
     """
     退出前的统一收尾 —— **必须**打出 `[结论]` 行。
 
-    ★ 为什么（2026-10-05，mimo 审查 P1-6）：调用方（尤其是 LLM）往往**只读尾部**；
+    ★ 为什么（2026-10-05）：调用方（尤其是 LLM）往往**只读尾部**；
       缺了 `[结论]` 行，它会照着退出码自己编原因 —— 2026-09-30 已经吃过一次，
       一次**成功**的任务被说成失败，还编了个「该文件夹不存在」的假理由。
       所以每条退出路径都要把「是什么 / 不是什么」写清楚。
@@ -75,7 +77,9 @@ def _password_guard_reason(task: str, device: str | None) -> str:
     """
     if _task_may_need_password(task):
         return f"任务里提到了密码/验证码（「{task}」）—— 脚本不代输密码"
-    hit = _password_prompt_hit(visible_texts(device))
+    # ★ limit=None（2026-10-05）：密码提示可能排在页面第 16 个元素之后，
+    #   用默认 limit=15 会**确定性漏检** —— 安全判据不能省这一下。
+    hit = _password_prompt_hit(visible_texts(device, limit=None))
     if hit:
         return f"当前屏幕上出现「{hit}」—— 很可能正在要求输入密码/验证码"
     return ""
@@ -99,7 +103,7 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
 
     :return: 进程退出码，0 表示任务完成，1 表示未完成或出错
     """
-    # ★ dry-run 必须**完全不碰手机**（2026-10-05，mimo 审查 P1-2）：
+    # ★ dry-run 必须**完全不碰手机**（2026-10-05）：
     #   旧实现把 ensure_yadb 放在这个判断**之前**，它会真的往手机 push yadb ——
     #   于是 README 里吹的「确认闸门」并不干净。现在 dry-run 直接跳过。
     if dry_run:
@@ -178,7 +182,10 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
     for step in range(1, max_steps + 1):
         try:
             real_img = screenshot(device)
-        except AdbError as exc:
+        except (AdbError, OSError) as exc:
+            # ★ 连 OSError 一起接（2026-10-05）：截图损坏时 Pillow 会抛
+            #   UnidentifiedImageError（是 OSError 但不是 AdbError）—— 旧写法只接
+            #   AdbError，这类异常会逃出 run()、以未捕获 traceback 崩溃，且没有 [结论] 行。
             return _adb_fail(f"第 {step} 步截图", exc)
         view_img = resize_for_model(real_img, view_width)
 
@@ -186,12 +193,12 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
         if step == 1:
             stuck = StuckDetector(real_img.width, real_img.height)
 
-        # ★ 界面粗指纹（2026-10-05，Claude 审查 10.1）：给卡死检测用 ——
+        # ★ 界面粗指纹（2026-10-05）：给卡死检测用 ——
         #   判断「点不动」时界面到底有没有变。计算器连按数字 / 步进器连点 /
         #   翻页连点都会让界面变，不该被判成卡死。
         screen_fp = screen_fingerprint(real_img)
 
-        # ★ 黑屏检测（2026-10-05，Claude 审查 阅读6）：锁屏 / FLAG_SECURE / 息屏时
+        # ★ 黑屏检测（2026-10-05）：锁屏 / FLAG_SECURE / 息屏时
         #   截图是纯黑的，模型看不见任何东西却照样「决策」= 盲操作。
         #   连续 BLANK_FRAME_MAX 步全黑就停下问人工（**不自动解锁** —— 解锁要密码）。
         if not dry_run and is_blank_frame(real_img):
@@ -222,7 +229,7 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
             return _conclude(1, f"[错误] 模型调用失败：{exc}",
                              "模型服务无响应或报错，**不是任务本身失败**")
 
-        # ★ 日志脱敏（2026-10-05，Claude 审查 B4）：TYPE 的正文可能是密码/私密消息，
+        # ★ 日志脱敏（2026-10-05）：TYPE 的正文可能是密码/私密消息，
         #   而日志会落盘长期保留。注意 history 里仍存**原文**（模型要看到自己输过什么）。
         info(f"模型决策：{json.dumps(_for_log(action), ensure_ascii=False)}")
 
@@ -257,16 +264,28 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
         #   * 连续 TYPE —— 模型点不中发送按钮时会反复追加文字，退化成 200 字乱码
         #   * 滑动超限 —— 目标明明已经可见，它还在无意义地滑（2026-10-01 加）
         block = stuck.should_block(action)
-        # ★ 拦之前先回读输入框（2026-10-05，Claude 审查 10.3）：框是**空的** ->
+        # ★ 拦之前先回读输入框（2026-10-05）：框是**空的** ->
         #   说明上一句已经发出去了（或上次输入本来就没上屏），这是合法的「再打一句」。
         #   旧实现会在这里无谓拦下，提示还错说「输入框里已有内容」。
-        #   读不到（None）时保守起见**仍然拦**。
+        #   ★ 判据放宽（2026-10-05）：只判 `== ""` 在主场景下**不生效** ——
+        #     Android 对空 EditText 会把 hint（占位文字，如「发消息」）当 text 返回，
+        #     聊天框几乎都带占位文字。现在改为：读到空串，**或**已不含上一条输入的文字
+        #     （= 那条确实发出去了），都算「已发送」。读不到（None）仍保守拦下。
         if (block
                 and str(action.get("action_type", "")).upper() == "TYPE"
-                and not dry_run and read_focused_text(device) == ""):
-            info("[放行] 回读到输入框是空的 —— 上一句应该已经发出去了，允许再输入")
-            stuck.reset_type_guard("回读到输入框为空 -> 视为已发送，放行一次 TYPE")
-            block = False
+                and not dry_run):
+            prev_typed = next(
+                (h.get("value", "") for h in reversed(history)
+                 if str(h.get("action_type", "")).upper() == "TYPE"), "")
+            now_text = read_focused_text(device)
+            box_cleared = (now_text is not None
+                           and (now_text == ""
+                                or (bool(prev_typed) and prev_typed not in now_text)))
+            if box_cleared:
+                info("[放行] 回读到输入框已不含上一条输入 —— 上一句应该已经发出去了，允许再输入")
+                stuck.reset_type_guard(
+                    "回读到输入框为空/已不含上一条 -> 视为已发送，放行一次 TYPE")
+                block = False
 
         if block:
             # ★ 判断不出输入框、且模型仍要「连打第二次」-> 停下报告，交给人工（2026-10-04 加）
@@ -363,8 +382,13 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
             history.append(failed)
 
         # ★ 需要人工介入：立即停止，不再尝试（2026-10-01 加）
+        #   ★ 用 execute_action 带回来的自定义抬头/结论（2026-10-05）：
+        #     旧写法不传 -> report_need_human 用默认措辞，于是「多个输入框」被
+        #     误报成「需要人工输入（密码）」，脚本自己给出**与事实相反**的结论。
         if res.need_human:
-            report_need_human(device, real_img, step, res.human_reason)
+            report_need_human(device, real_img, step, res.human_reason,
+                              headline=res.human_headline or None,
+                              conclusion=res.human_conclusion or None)
             return EXIT_NEED_HUMAN
 
         if not res.ok:
@@ -403,7 +427,7 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
             # 退出码还是 0，调用方会以为成功了。这类「假成功」比空转更危险。
             suspects: list[str] = []
 
-            # ★ 被拦的 TYPE **不算**「打过字」（2026-10-05，mimo 审查 P2）：
+            # ★ 被拦的 TYPE **不算**「打过字」（2026-10-05）：
             #   它根本没执行，算进去会掩盖「全程没打字却喊完成」的假成功。
             did_type = any(h.get("action_type") == "TYPE" for h in history)
             if not did_type and _looks_like_text_task(task):
@@ -416,7 +440,14 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
 
             # 前台应用和起点一模一样：说明压根没离开过起点。
             # 这是「起点状态污染」最直接的证据。
-            end_pkg = current_package(device)
+            # ★ current_package 现在会在 adb 失败时抛错（2026-10-05）——
+            #   这里是**任务完成后**的收尾，不该因为读不到前台就崩；但也**不静默跳过**：
+            #   明确打一句警告，让人知道「是否离开起点」这条检查没做成。
+            try:
+                end_pkg = current_package(device)
+            except AdbError:
+                end_pkg = ""
+                print("[警告] 结束时读不到前台应用 —— 「是否离开起点」这条可疑完成检查已跳过")
             if baseline_pkg and end_pkg and end_pkg == baseline_pkg \
                     and _looks_like_text_task(task):
                 suspects.append(f"结束时前台仍是起点的「{end_pkg}」，全程没离开过起点")

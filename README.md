@@ -201,14 +201,14 @@ my_project/
 │   ├── config.py       337 行   所有常量 + _PROJECT_ROOT
 │   ├── deps.py          15 行   第三方依赖统一导入
 │   ├── output.py       216 行   输出控制 + 日志/截图清理
-│   ├── adb.py          259 行   ADB 基础（命令/设备/截图/点击/滑动/按键）
-│   ├── apps.py         394 行   App 操作（包名解析/启动/复位/中文输入）
-│   ├── ui.py           354 行   界面树解析（dump/节点/输入框/可见文字）
-│   ├── vision.py       609 行   模型交互（提示词/解析/请求重试）
+│   ├── adb.py          296 行   ADB 基础（命令/设备/截图/点击/滑动/按键）
+│   ├── apps.py         426 行   App 操作（包名解析/启动/复位/中文输入）
+│   ├── ui.py           356 行   界面树解析（dump/节点/输入框/可见文字）
+│   ├── vision.py       645 行   模型交互（提示词/解析/请求重试）
 │   ├── tasks.py        221 行   任务判定（纯打开/简单任务/发文字/密码防护）
-│   ├── actions.py      573 行   动作执行 + 卡死检测
-│   ├── runner.py       462 行   主循环
-│   └── phone_agent.py  166 行   命令行入口
+│   ├── actions.py      610 行   动作执行 + 卡死检测
+│   ├── runner.py       493 行   主循环
+│   └── phone_agent.py  167 行   命令行入口
 ├── tests/                      离线测试（标准库 unittest，不碰真机/模型）
 │   ├── fakes.py                假件与打桩工具
 │   ├── test_runner_flow.py     主循环控制流

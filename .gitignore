@@ -20,6 +20,9 @@ tmp/
 .coverage
 htmlcov/
 
+# ---- 工具缓存 ----
+.ruff_cache/
+
 # ---- IDE ----
 .vscode/
 .idea/

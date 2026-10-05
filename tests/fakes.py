@@ -162,7 +162,7 @@ def runner_env(actions, *, exec_fn=None, cur_pkg="com.android.settings",
         "current_package": lambda device: cur_pkg,
         "detect_app_in_task": lambda task, device=None: detect,
         "launch_app": _launch,
-        "visible_texts": lambda device=None: (texts or []),
+        "visible_texts": lambda device=None, **kw: (texts or []),
         "point_hits_editable": lambda device, pt, margin_px=24: hits_editable,
         # 默认「读不到聚焦输入框」（None）—— 让「拦前回读放行」那条路径保持关闭，
         # 需要测它的用例自行 overrides

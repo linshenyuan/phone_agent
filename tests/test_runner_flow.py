@@ -130,7 +130,7 @@ class RunnerFlow(unittest.TestCase):
 
 
 class 拦前回读输入框(unittest.TestCase):
-    """★ Claude 审查 10.3：连续 TYPE 被拦前先回读输入框，空则放行。"""
+    """★ 连续 TYPE 被拦前先回读输入框，空则放行。"""
 
     def test_回读为空则放行照常执行(self):
         # CLICK → TYPE → TYPE：第 3 步本该被拦；回读输入框为空 -> 应放行
@@ -148,9 +148,26 @@ class 拦前回读输入框(unittest.TestCase):
             rc = run_task("打开设置", max_steps=4)
         self.assertEqual(len(h.exec_calls), 3, "读不到输入框时应保守拦下")
 
+    def test_回读到占位文字也算已发送(self):
+        # ★ Android 对空 EditText 会把 hint（占位文字）当 text 返回，
+        #   旧判据 `== ""` 在带占位文字的聊天框上根本不触发。
+        actions = [CLICK(), TYPE("你好"), TYPE("世界"), COMPLETE]
+        with runner_env(actions,
+                        overrides={"read_focused_text": lambda device=None: "发消息"}) as h:
+            rc = run_task("打开设置", max_steps=4)
+        self.assertEqual(len(h.exec_calls), 4, "占位文字不含上一条输入 -> 应放行")
+        self.assertEqual(rc, 0)
+
+    def test_回读到上一条内容仍拦下(self):
+        actions = [CLICK(), TYPE("你好"), TYPE("世界"), COMPLETE]
+        with runner_env(actions,
+                        overrides={"read_focused_text": lambda device=None: "你好"}) as h:
+            rc = run_task("打开设置", max_steps=4)
+        self.assertEqual(len(h.exec_calls), 3, "框里仍有上一条 -> 应拦下")
+
 
 class 黑屏时停下问人工(unittest.TestCase):
-    """★ Claude 审查 阅读6：连续全黑 -> 退出码 4，不盲操作。"""
+    """★ 连续全黑 -> 退出码 4，不盲操作。"""
 
     def test_连续黑屏退出码4(self):
         from fakes import FakeImage

@@ -64,7 +64,7 @@ class 点击打转(unittest.TestCase):
         d = sd()
         for x in (200, 800, 200, 800):
             self.assertIsNone(d.update(C(x, 400)), "A B A B 当前不应判卡死")
-        self.assertEqual(d._count_same_spot(d.clicks), 2)
+        self.assertEqual(d._count_stuck_clicks(), 2)
 
     def test_中间夹无关动作_不清空窗口(self):
         # 旧实现的缺陷之一：别的动作会把窗口清空，导致打转识别不出来
@@ -128,7 +128,7 @@ class 滑动(unittest.TestCase):
 
 
 class 界面指纹与卡死(unittest.TestCase):
-    """★ Claude 审查 10.1：同点连点**且界面没变**才算卡死。"""
+    """★ 同点连点**且界面没变**才算卡死。"""
 
     def test_同点且界面没变_才判卡死(self):
         d = sd()
@@ -160,7 +160,7 @@ class 界面指纹与卡死(unittest.TestCase):
 
 
 class 黑屏检测(unittest.TestCase):
-    """★ Claude 审查 阅读6：锁屏 / FLAG_SECURE / 息屏会让截图全黑。"""
+    """★ 锁屏 / FLAG_SECURE / 息屏会让截图全黑。"""
 
     def test_纯黑算黑屏(self):
         self.assertTrue(is_blank_frame(FakeImage(color=(0, 0, 0))))
@@ -171,7 +171,7 @@ class 黑屏检测(unittest.TestCase):
 
 
 class 发送后放行TYPE(unittest.TestCase):
-    """★ Claude 审查 10.3：发送成功后要再打一句，不该被连续 TYPE 保护拦下。"""
+    """★ 发送成功后要再打一句，不该被连续 TYPE 保护拦下。"""
 
     def test_回读为空则清零放行(self):
         d = sd()

@@ -163,7 +163,7 @@ class COMPLETE保留结果(unittest.TestCase):
 
 class KEY_VALUE不截断(unittest.TestCase):
     def test_值里的伪键不再被切断(self):
-        # ★ Claude 审查 #1：旧实现会把值从 ", address:" 处切断，而截断后
+        # ★ 旧实现会把值从 ", address:" 处切断，而截断后
         #   仍能通过回读校验 → 半截消息被发出去，还算成功
         a = parse_action("action:TYPE\tvalue:meet me at the cafe, address: 12 Main St")
         self.assertEqual(a.get("value"), "meet me at the cafe, address: 12 Main St")
@@ -178,10 +178,149 @@ class KEY_VALUE不截断(unittest.TestCase):
             self.assertEqual(out["action_type"], "CLICK")
             self.assertEqual(out["point"], (500.0, 800.0))
 
+    def test_自由文本里的空格加已知键不被切(self):
+        # ★ 已知键被**空格**分隔时，在 value/text 里应算正文，不切。
+        #   旧实现把这些正文砍半截，而截断后仍能通过回读校验 → 半截消息发出还判成功。
+        for raw, want in (
+            ("action:TYPE\tvalue:set value: 5 now", "set value: 5 now"),
+            ("action:TYPE\tvalue:see point: 5 above", "see point: 5 above"),
+            ("action:TYPE\tvalue:the text: is here", "the text: is here"),
+            ("action:TYPE\tvalue:open app: now", "open app: now"),
+        ):
+            self.assertEqual(parse_action(raw).get("value"), want, raw)
+
+
+class 重复键取第一次(unittest.TestCase):
+    """★ 旧实现 last-wins（静默执行后一个候选），日志无从追溯。"""
+
+    def test_重复app保留第一次(self):
+        self.assertEqual(parse_action("action:OPEN app:WECHAT\n app:QQ")["app"], "WECHAT")
+
+    def test_重复value保留第一次(self):
+        self.assertEqual(
+            parse_action("action:TYPE value:hello \n value:world")["value"], "hello")
+
+
+class max_tokens截断检测(unittest.TestCase):
+    """★ 截断后的半截坐标仍是合法坐标，必须靠 finish_reason 检出。"""
+
+    def test_finish_reason_length判失败(self):
+        from PIL import Image as PILImage
+        from phone_agent import vision
+        resp = mock.Mock()
+        resp.choices = [mock.Mock()]
+        resp.choices[0].finish_reason = "length"
+        resp.choices[0].message.content = "action:CLICK\tpoint:500,8"
+        client = mock.Mock()
+        client.chat.completions.create.return_value = resp
+        with self.assertRaises(ValueError):
+            vision._ask_once(client, "m", PILImage.new("RGB", (8, 8)), "任务", [])
+
+    def test_finish_reason_stop正常(self):
+        from PIL import Image as PILImage
+        from phone_agent import vision
+        resp = mock.Mock()
+        resp.choices = [mock.Mock()]
+        resp.choices[0].finish_reason = "stop"
+        resp.choices[0].message.content = "action:CLICK\tpoint:500,800"
+        client = mock.Mock()
+        client.chat.completions.create.return_value = resp
+        out = vision._ask_once(client, "m", PILImage.new("RGB", (8, 8)), "任务", [])
+        self.assertEqual(out["action_type"], "CLICK")
+
+
+class 坐标越界拒绝执行(unittest.TestCase):
+    """★ 旧实现把越界坐标静默夹回屏幕边（SLIDE 会退化成原地长按）。"""
+
+    def _click(self, x, y):
+        from phone_agent.actions import execute_action
+        return execute_action({"action_type": "CLICK", "point": (x, y)},
+                              (1080, 2408), None, True, dry_run=True)
+
+    def test_越界不夹紧而是判失败(self):
+        res = self._click(1040, 500)
+        self.assertFalse(res.ok)
+        self.assertIn("越界", res.note)
+
+    def test_正常坐标照常执行(self):
+        self.assertTrue(self._click(500, 500).ok)
+
+    def test_SLIDE端点越界判失败(self):
+        from phone_agent.actions import execute_action
+        res = execute_action(
+            {"action_type": "SLIDE", "point1": (1040, 500), "point2": (1040, 500)},
+            (1080, 2408), None, True, dry_run=True)
+        self.assertFalse(res.ok)
+
+
+class 截图损坏包成AdbError(unittest.TestCase):
+    """★ Image.open 抛的是 OSError 非 AdbError，会逃出 run() 的 except。"""
+
+    def test_垃圾数据抛AdbError(self):
+        from phone_agent.adb import _open_png
+        with self.assertRaises(AdbError):
+            _open_png(b"this is definitely not a png")
+
+
+class 截图12字节header(unittest.TestCase):
+    """★ Android 7/8 的 screencap header 只有 12 字节（无色彩空间）。"""
+
+    def test_旧版header能解析(self):
+        import struct
+        import phone_agent.adb as adb_mod
+        w, h = 2, 3
+        raw = struct.pack("<III", w, h, 1) + b"\x00" * (w * h * 4)
+        with mock.patch.object(adb_mod, "adb", lambda *a, **k: raw):
+            img = adb_mod.screenshot(None)
+        self.assertEqual(img.size, (w, h))
+
+
+class current_package抛错(unittest.TestCase):
+    """★ 旧实现吞掉 AdbError 返回 ""，使 runner 的 _adb_fail 成死代码。"""
+
+    def test_adb失败时抛AdbError(self):
+        import phone_agent.apps as apps_mod
+        with mock.patch.object(apps_mod, "adb", side_effect=AdbError("offline")):
+            with self.assertRaises(AdbError):
+                apps_mod.current_package(None)
+
+
+class 输入正文脱敏(unittest.TestCase):
+    """★ AdbError 消息里带 `-keyboard <正文>` 会明文写进日志。"""
+
+    def test_yadb失败时正文被脱敏(self):
+        import phone_agent.apps as apps_mod
+        with mock.patch.object(
+                apps_mod, "adb",
+                side_effect=AdbError("adb shell ... -keyboard 秘密口令 失败：x")):
+            with self.assertRaises(AdbError) as ctx:
+                apps_mod.input_text("秘密口令", None, has_yadb=True)
+        self.assertNotIn("秘密口令", str(ctx.exception), "正文不该出现在报错里")
+
+    def test_yadb不可用时正文被脱敏(self):
+        import phone_agent.apps as apps_mod
+        with self.assertRaises(AdbError) as ctx:
+            apps_mod.input_text("秘密口令", None, has_yadb=False)
+        self.assertNotIn("秘密口令", str(ctx.exception))
+
+
+class 多输入框自定义结论(unittest.TestCase):
+    """★ 旧实现不传 headline/conclusion → 默认打出「需要人工输入（密码）」。"""
+
+    def test_歧义时带自定义结论(self):
+        from phone_agent import actions as A
+        with mock.patch.object(A, "focus_editable_box",
+                               lambda *a, **k: (False, "多个输入框", None, False, True)):
+            res = A.execute_action({"action_type": "TYPE", "value": "hi"},
+                                   (1080, 2408), None, True, False)
+        self.assertTrue(res.need_human)
+        self.assertIn("输入框", res.human_headline)
+        self.assertNotIn("密码", res.human_headline, "多输入框不该报成密码场景")
+
 
 class 文字任务判定(unittest.TestCase):
     def test_功能名不算要打字(self):
-        # ★ Claude 审查 #3：这三个是纯打开任务，旧版判成文字任务 → 退出码 3
+        # ★ 这三个是纯打开任务，旧版判成文字任务 → 退出码 3
         for t in ("打开短信", "查看邮件", "打开输入法设置"):
             self.assertFalse(_looks_like_text_task(t), f"{t} 不该被判成文字任务")
 
@@ -192,7 +331,7 @@ class 文字任务判定(unittest.TestCase):
 
 class 大小写不敏感(unittest.TestCase):
     def test_大小写混写的App名也算纯打开(self):
-        # ★ Claude 审查 #9：旧版剥不掉 "WeChat" → 误判非纯打开 → 错过零模型短路
+        # ★ 旧版剥不掉 "WeChat" → 误判非纯打开 → 错过零模型短路
         with alias_env():
             self.assertTrue(_is_pure_open_task("打开WeChat", "com.tencent.mm"))
             self.assertTrue(_is_pure_open_task("打开wechat", "com.tencent.mm"))
@@ -222,7 +361,7 @@ class 模型名匹配(unittest.TestCase):
 
 class 多设备不静默挑第一台(unittest.TestCase):
     def test_多设备未指定则报错(self):
-        # ★ Claude 审查 #4：会发消息的工具，操作错手机是最糟的结果
+        # ★ 会发消息的工具，操作错手机是最糟的结果
         import phone_agent.adb as adb_mod
         with mock.patch.object(adb_mod, "list_devices", return_value=["dev1", "dev2"]):
             with self.assertRaises(SystemExit):
@@ -278,7 +417,7 @@ class adb异常留结论行(unittest.TestCase):
 
 class TYPE清空上限(unittest.TestCase):
     def test_上限远高于20(self):
-        # ★ Claude 审查 B1：旧实现固定只清 20 个字符 —— 长消息清不干净，
+        # ★ 旧实现固定只清 20 个字符 —— 长消息清不干净，
         #   残留会被下一次重试**追加**在后面（还是半截 + 拼错）
         self.assertGreater(TYPE_CLEAR_MAX, 20)
 

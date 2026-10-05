@@ -48,7 +48,7 @@ def _looks_like_text_task(task: str) -> bool:
     """
     t = task
     # 「输入法」是**功能名**、不是动作 —— 先抠掉，否则「打开输入法设置」会被
-    # 误判成要打字（2026-10-05 修，Claude 审查 #3）
+    # 误判成要打字（2026-10-05 修）
     for w in _TEXT_FALSE_POSITIVES:
         t = t.replace(w, "")
     for w in _SAY_FALSE_POSITIVES:

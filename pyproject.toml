@@ -10,7 +10,9 @@ description = "Vision-model-driven Android GUI agent over ADB (based on GELab-Ze
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"                                  # PEP 639 写法（旧的 {text = "MIT"} 已弃用）
-license-files = ["LICENSE", "LICENSES/*.txt"]    # 把 LGPL/GPL 文本纳入元数据
+# 把 LGPL/GPL 文本 + 第三方声明纳入元数据 —— 都落到 `<pkg>.dist-info/licenses/`，
+# 既不污染 venv 根目录，也能随 wheel 分发（2026-10-05）。
+license-files = ["LICENSE", "LICENSES/*.txt", "THIRD_PARTY_NOTICES.md"]
 authors = [
     { name = "linshenyuan" },
 ]
@@ -51,10 +53,12 @@ where = ["src"]
 # ★ 关键（2026-10-02 审计）：bin/ 与 LICENSES/ 在 src/ 之外，
 #   必须显式声明才会进 wheel，否则 pip install . 后找不到 yadb、
 #   且 LGPL-3.0 要求的许可证副本不会随分发包出去。
+#   ⚠️ 不要再用 `"." = [...]` 把 LICENSE/THIRD_PARTY_NOTICES 装到 sys.prefix 根目录
+#   （2026-10-05）：那会污染 venv 根，而且与上面的 license-files 重复
+#   —— 后者已把它们放进 `<pkg>.dist-info/licenses/`。
 [tool.setuptools.data-files]
 "bin" = ["bin/yadb"]
 "LICENSES" = ["LICENSES/LGPL-3.0.txt", "LICENSES/GPL-3.0.txt"]
-"." = ["THIRD_PARTY_NOTICES.md", "LICENSE"]
 
 # ══════════════════════════════════════════════════════
 # 代码风格工具（可选，未强制）

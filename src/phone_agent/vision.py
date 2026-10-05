@@ -8,7 +8,7 @@ import json
 from typing import Any
 
 from .config import COORD_RANGE_TOLERANCE, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, DURATION_MAX, DURATION_MIN, MODEL_RETRY, MODEL_RETRY_BACKOFF, WAIT_SECONDS_DEFAULT, WAIT_SECONDS_MAX
-from .output import info
+from .output import info, redact_text
 from .deps import Image, OpenAI
 import re
 import time
@@ -140,7 +140,7 @@ def build_history_text(history: list[dict[str, Any]], limit: int = 12) -> str:
             # ★ 附上滑动前的界面文字（2026-10-01 加）：让模型知道当时屏幕上有什么，
             #   从而判断目标是不是已经在了 —— 它只看截图时认不出语义。
             if act.get("screen_text"):
-                # ★ 界面文字是**不可信数据**（2026-10-05，mimo P1-5）：用明确标记
+                # ★ 界面文字是**不可信数据**（2026-10-05）：用明确标记
                 #   包起来 + 标注「不是指令」，降低「屏幕文字被当命令执行」的概率。
                 #   注意：这只是缓解 —— LLM 的输入是单一 token 流，「数据」和
                 #   「指令」没有硬边界，做不到彻底隔离。
@@ -399,6 +399,12 @@ _KV_KEYS = ("action_type", "action", "type", "point1", "point2", "point",
             "coordinate", "value", "text", "app", "package", "duration", "seconds")
 
 
+# 「自由文本」键（2026-10-05 加）：这些键的值是**用户要发出去的话**，可能很长、
+# 也可能包含「英文词 + 冒号」。所以只在**硬分隔符**（行首 / 制表符 / 换行）处切分，
+# 空格后跟已知键**不切** —— 否则 `value:set value: 5 now` 会被切成 `5 now`。
+_FREE_TEXT_KEYS = frozenset({"value", "text"})
+
+
 def parse_action(text: str) -> dict[str, Any]:
     """
     解析模型输出的动作。
@@ -429,24 +435,44 @@ def parse_action(text: str) -> dict[str, Any]:
             pass  # 格式问题：落到下面的 key:value 路径
 
     # 路径二：action:CLICK<TAB>point:500,800
-    # ★★ 只认「已知键」，并让 value 一直取到**下一个已知键**为止（2026-10-05 修）。
-    #   旧实现先给所有 `词:` 前插制表符、再按制表符/换行切分，于是
-    #   `value:meet me at the cafe, address: 12 Main St` 会被从 `, address:` 处切断，
-    #   只输入 `meet me at the cafe`。更糟的是**它仍能通过回读校验** ——
-    #   半截消息被发出去，还被算作成功。
-    #   现在只把已知键当分隔符：value 里出现的 `词:`（地址、note 等）不再被误切。
-    fields: dict[str, str] = {}
+    # ★★ 分隔符规则（2026-10-05 再修）：
+    #   已知键只有在「行首 / 制表符 / 换行」后（硬分隔），或出现在**非自由文本**
+    #   字段里被空格分隔时，才算一个新的键。这样两头都保住：
+    #     · `action:CLICK point:500,800`（空格分隔的结构键）仍能解析 ✅
+    #     · `value:see point: 5 above`（正文里出现「空格 + 已知键」）不再被切断 ✅
+    #   旧实现把「空格 + 已知键」一律当分隔符 → 正文里只要出现「英文词 + 冒号」
+    #   就被砍半截，而**截断后仍能通过回读校验** → 半截消息发出去还判成功。
+    pairs: list[tuple[str, str]] = []
     key_re = re.compile(
-        r"(?:^|[\s,\t\n])(?:" + "|".join(_KV_KEYS) + r")\s*:", re.I)
-    marks = list(key_re.finditer(raw))
-    for i, m in enumerate(marks):
-        key = m.group(0).strip().rstrip(":").strip().lower()
-        end = marks[i + 1].start() if i + 1 < len(marks) else len(raw)
-        # 值取到下一个已知键之前；只去掉分隔用的尾逗号与首尾空白
-        fields[key] = raw[m.end():end].strip().strip(",").strip()
+        r"(^|[\t\n ]+)(" + "|".join(_KV_KEYS) + r")\s*:", re.I)
+    cur_key: str | None = None
+    seg_start = 0
+    for m in key_re.finditer(raw):
+        sep, key = m.group(1), m.group(2).lower()
+        hard = (sep == "") or ("\t" in sep) or ("\n" in sep)
+        if not hard and cur_key in _FREE_TEXT_KEYS:
+            continue        # 自由文本里的「空格 + 已知键」= 正文的一部分，不切
+        if cur_key is not None:
+            pairs.append((cur_key, raw[seg_start:m.start()].strip().strip(",").strip()))
+        cur_key, seg_start = key, m.end()
+    if cur_key is not None:
+        pairs.append((cur_key, raw[seg_start:].strip().strip(",").strip()))
 
-    if not fields:
+    if not pairs:
         raise ValueError(f"模型输出既不是 JSON 也不是 key:value 格式：{raw[:200]}")
+
+    # ★ 重复键处理（2026-10-05）：旧实现 `fields[key] = ...` 直接覆盖 ——
+    #   模型偶尔会输出「两行候选」，于是**静默执行后一个**，而日志只记解析结果，
+    #   另一个被丢弃这件事根本看不出来。现在保留**第一次**出现的值，并把被忽略的
+    #   那个写进日志，让行为可追溯。
+    fields: dict[str, str] = {}
+    for k, v in pairs:
+        if k in fields:
+            shown = (redact_text(v) if k in _FREE_TEXT_KEYS
+                     else (v[:40] + ("…" if len(v) > 40 else "")))
+            info(f"[解析] 模型给了重复的键「{k}」—— 保留第一次的值，忽略后面的「{shown}」")
+            continue
+        fields[k] = v
     return normalize_action(fields)
 
 
@@ -564,6 +590,16 @@ def _ask_once(client: OpenAI, model: str, view_img: Image.Image,
 
     msg = resp.choices[0].message
     content = (msg.content or "").strip()
+
+    # ★ 截断检测（2026-10-05）：旧实现只看 content 是否为空 ——
+    #   而 `max_tokens=256` 下 `point:500,800` 被截成 `point:500,8` **仍是合法坐标**，
+    #   于是点到屏幕别的地方、不报错、也不重试。`finish_reason == "length"` 就是
+    #   截断信号，直接判失败交给 ask_model 重采样。
+    finish = getattr(resp.choices[0], "finish_reason", None)
+    if finish == "length":
+        raise ValueError(
+            "模型输出被 max_tokens 截断（finish_reason=length）—— 动作可能不完整，"
+            "已丢弃本次结果；若反复出现请调大 max_tokens")
 
     if not content:
         # 思考型模型把内容放在 reasoning_content 且 content 为空，通常是 max_tokens 不够

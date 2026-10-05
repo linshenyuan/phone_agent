@@ -174,7 +174,7 @@ def redact_text(text: Any, keep: int = 2) -> str:
     """
     日志脱敏：只保留开头 `keep` 个字 + 总长度，短文本整体打码。
 
-    ★ 为什么需要（2026-10-05，Claude 审查）：TYPE 的正文可能是**密码、验证码、
+    ★ 为什么需要（2026-10-05）：TYPE 的正文可能是**密码、验证码、
       私密消息**，而日志会落盘并长期保留（`log/run_*.log`）。旧实现把正文原样
       写进日志，等于明文留档。
 
@@ -205,7 +205,7 @@ def prune_tmp(keep: int | None = None) -> None:
     """
     k = TMP_KEEP if keep is None else keep
     try:
-        # ★ 只清本工具自己产的截图（2026-10-05，mimo 审查）：原来用
+        # ★ 只清本工具自己产的截图（2026-10-05）：原来用
         #   glob("*.png") 会把用户自己放进 tmp/ 的图一并删掉。
         shots = sorted([*TMP_DIR.glob("complete_step*.png"),
                         *TMP_DIR.glob("need_human_step*.png")],

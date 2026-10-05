@@ -9,20 +9,23 @@ from pathlib import Path
 
 from .adb import AdbError, adb, keyevent
 from .config import APP_ALIASES_FILE, YADB_CANDIDATES, YADB_MD5
-from .output import info
+from .output import info, redact_text
 
 
 
 def current_package(device: str | None = None) -> str:
     """
-    当前前台 App 的包名；拿不到返回空串。
+    当前前台 App 的包名；**解析不出**返回空串。
+
+    ★ 契约变更（2026-10-05）：旧实现把 `AdbError` 也吞掉、一律返回 ""，
+      后果是 runner 里 `_adb_fail("读取当前前台应用")` **永远不可达**（死代码），
+      而且掉线时 `baseline_pkg=""` 会让「全程没离开起点」这条假成功判据**被静默跳过**。
+      现在只在「adb 通了、但没解析出包名」时返回 ""；**adb 本身失败就抛 AdbError**，
+      由调用方决定是收尾还是降级（信息性调用点会自行 try/except）。
 
     用途：① 执行前复位时判断要不要 force-stop ② 完成时当作基线对比。
     """
-    try:
-        out = str(adb("shell", "dumpsys", "window", "displays", device=device))
-    except AdbError:
-        return ""
+    out = str(adb("shell", "dumpsys", "window", "displays", device=device))
     # 优先 mCurrentFocus，退回 mFocusedApp
     for key in ("mCurrentFocus=", "mFocusedApp="):
         i = out.find(key)
@@ -179,7 +182,12 @@ def reset_to_home(device: str | None, kill_package: str | None = None,
 
     :param kill_package: 要强制停止的包名；None 表示不强杀任何 App
     """
-    before = current_package(device)
+    # 这两个 current_package 只是**信息性**（打日志用），读不到不该让复位失败
+    # （2026-10-05：current_package 现在会在 adb 失败时抛 AdbError，见其 docstring）
+    try:
+        before = current_package(device)
+    except AdbError:
+        before = ""
 
     if kill_package:
         if verbose:
@@ -197,7 +205,10 @@ def reset_to_home(device: str | None, kill_package: str | None = None,
     keyevent(3, device)
     time.sleep(1.0)
 
-    after = current_package(device)
+    try:
+        after = current_package(device)
+    except AdbError:
+        after = ""
     if verbose:
         info(f"[复位] 回到桌面（前台：{after or '未知'}）")
         if not _is_home(after):
@@ -263,6 +274,20 @@ def ensure_yadb(device: str | None, verbose: bool = True) -> bool:
 
 
 
+def _redact_text_in(msg: str, text: str) -> str:
+    """
+    把报错信息里**出现的输入正文**替换成脱敏版本。
+
+    ★ 为什么（2026-10-05）：yadb / `input text` 失败时，AdbError 的
+      消息里会把 `-keyboard <正文>` 原样带出来，最终经 runner 的 `_conclude` 写进
+      `log/run_*.log` **长期留存** —— 而正文可能是验证码、私密消息。
+      在**知道正文是什么**的这里替换，比在通用 adb() 里瞎猜哪个参数敏感更准。
+    """
+    if text and text in msg:
+        return msg.replace(text, redact_text(text))
+    return msg
+
+
 def input_text(text: str, device: str | None = None, has_yadb: bool = True) -> None:
     """
     在当前焦点处输入文字。
@@ -273,19 +298,26 @@ def input_text(text: str, device: str | None = None, has_yadb: bool = True) -> N
     if text.isascii() and " " not in text and text.isprintable():
         # 原生 input text 对 shell 元字符敏感，这里只走安全字符集
         if re.fullmatch(r"[A-Za-z0-9._@\-]+", text):
-            adb("shell", "input", "text", text, device=device)
+            try:
+                adb("shell", "input", "text", text, device=device)
+            except AdbError as exc:
+                # 失败信息里带着正文 -> 脱敏后再抛，避免明文落进日志
+                raise AdbError(_redact_text_in(str(exc), text)) from None
             return
 
     if not has_yadb:
-        raise AdbError(f"需要输入「{text}」，但 yadb 不可用，无法输入非 ASCII 文本")
+        raise AdbError(f"需要输入「{redact_text(text)}」，但 yadb 不可用，无法输入非 ASCII 文本")
 
-    adb("shell",
-        "app_process",
-        "-Djava.class.path=/data/local/tmp/yadb",
-        "/data/local/tmp",
-        "com.ysbing.yadb.Main",
-        "-keyboard", text,
-        device=device)
+    try:
+        adb("shell",
+            "app_process",
+            "-Djava.class.path=/data/local/tmp/yadb",
+            "/data/local/tmp",
+            "com.ysbing.yadb.Main",
+            "-keyboard", text,
+            device=device)
+    except AdbError as exc:
+        raise AdbError(_redact_text_in(str(exc), text)) from None
 
 
 

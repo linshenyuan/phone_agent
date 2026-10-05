@@ -145,7 +145,7 @@ def _focused_editable_text(nodes: list[dict[str, Any]]) -> str | None:
 
 
 
-def visible_texts(device: str | None = None, limit: int = 15,
+def visible_texts(device: str | None = None, limit: int | None = 15,
                   max_len: int = 24) -> list[str]:
     """
     dump 一次，提取当前界面上**可见的文字**，供模型判断「目标是不是已经在了」。
@@ -158,7 +158,9 @@ def visible_texts(device: str | None = None, limit: int = 15,
     ★ 成本：一次 dump 实测约 2.4 秒（4 趟 adb 往返），所以只在 SLIDE 前调用，
       不做成每步都跑。
 
-    :param limit: 最多返回多少条（防刷屏、控 token）
+    :param limit: 最多返回多少条（防刷屏、控 token）；**None = 不限**。
+                  密码提示检测必须传 None（2026-10-05）：元素多的页面上
+                  「请输入密码」排在第 limit 条之后就会被**确定性漏检**。
     :param max_len: 每条最长多少字符，超出截断加省略号
     :return: 去重后的可见文字列表；拿不到界面树时返回空列表
     """
@@ -174,7 +176,7 @@ def visible_texts(device: str | None = None, limit: int = 15,
             continue
         seen.add(t)
         out.append(t if len(t) <= max_len else t[:max_len] + "…")
-        if len(out) >= limit:
+        if limit is not None and len(out) >= limit:
             break
     return out
 

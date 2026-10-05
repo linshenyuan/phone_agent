@@ -12,7 +12,7 @@ from .apps import current_package, input_text, launch_app
 from .config import TMP_DIR, BLANK_FRAME_LEVEL, BLANK_FRAME_RATIO, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, EXIT_NEED_HUMAN, MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, SCREEN_FP_SIZE, SCREEN_FP_STATUS_BAR, STUCK_POSITION_TOLERANCE_PX, STUCK_REPEAT_THRESHOLD, STUCK_SLIDE_REPEAT_THRESHOLD, STUCK_TYPE_REPEAT_THRESHOLD, STUCK_WINDOW, TYPE_CLEAR_MAX, TYPE_RETRY, TYPE_VERIFY_DELAY, WAIT_SECONDS_DEFAULT, WAIT_SECONDS_MAX
 from .output import info, prune_tmp, redact_text
 from .ui import focus_editable_box, read_focused_text
-from .vision import parse_point
+from .vision import InvalidActionError, parse_point
 from .deps import Image
 
 def _norm(s: Any) -> str:
@@ -34,9 +34,15 @@ class ExecResult:
     finished: bool = False
     result_text: str = ""
     # ★ 需要人工介入（2026-10-01 加）：命中就**立即停止任务**，不是继续尝试。
-    #   目前唯一触发场景：模型要往密码框里打字 —— 密码一律留给用户输入。
+    #   目前触发场景：模型要往密码框里打字 / 界面有多个输入框无法确定目标。
     need_human: bool = False
     human_reason: str = ""
+    # ★ 交给 report_need_human 的抬头与结论（2026-10-05）：
+    #   留空则用 report_need_human 的默认措辞（默认是「需要人工输入（密码）」）。
+    #   为什么要有它：多输入框歧义时若沿用默认措辞，脚本会打出**与事实相反**的
+    #   「需要人工输入（密码）」—— 而真实原因只是「有多个输入框」。
+    human_headline: str = ""
+    human_conclusion: str = ""
 
 
 
@@ -56,7 +62,7 @@ def screen_fingerprint(img: Image.Image) -> int:
     """
     截图的**粗指纹**（8×8 灰度均值哈希），用来判断「界面到底有没有变化」。
 
-    ★ 为什么要它（2026-10-05，Claude 审查 10.1）：旧判据只看「是不是打在同一个点」，
+    ★ 为什么要它（2026-10-05）：旧判据只看「是不是打在同一个点」，
       于是计算器连按数字、步进器连点加减、「下一页」连点都会被判成卡死并终止任务。
       加上「界面没变」这一条：变了 = 有进展，不算卡死。
 
@@ -86,7 +92,7 @@ def is_blank_frame(img: Image.Image) -> bool:
     """
     整屏是不是**近黑**（锁屏 / FLAG_SECURE / 息屏的典型表现）。
 
-    ★ 为什么要它（2026-10-05，Claude 审查 阅读6）：这些情况下截图是纯黑的，
+    ★ 为什么要它（2026-10-05）：这些情况下截图是纯黑的，
       模型看不见任何东西却照样「决策」= 盲操作，结果完全不可预期。
       检出后由调用方**停下问人工**（不自动解锁 —— 解锁要密码，不该代做）。
     """
@@ -114,7 +120,7 @@ class StuckDetector:
     这一版：按**归一化距离容差**归并，三类动作各自独立计数，互不清零；
     命中就由调用方终止任务。
 
-    ★ 容差怎么换算（2026-10-05 澄清，Claude 审查 D1）：
+    ★ 容差怎么换算（2026-10-05 澄清）：
       归一化容差 = STUCK_POSITION_TOLERANCE_PX / **屏幕长边像素** × 1000，
       **横竖用同一个归一化数**。所以在 1080×2408 上：
         纵向 ≈ 30px；横向 ≈ 13px（同一归一化值乘横向像素密度）
@@ -136,8 +142,6 @@ class StuckDetector:
         # ★ 整局滑动总次数（2026-10-01 加）：超过 MAX_SLIDE_TOTAL 就拦截。
         #   与 slides 窗口的区别：那个判「重复滑同一条」，这个判「滑得太多」。
         self.slide_total = 0
-        # 拦截状态：让 update 只报一次，避免同一原因反复弹
-        self._blocked_type = False
         # 最近一次点击对「连续 TYPE 计数」的影响，仅用于日志排查
         self.last_reset_note = ""
         # ★ 最近一次点击「是不是输入框」判断不出来（界面读不透）—— 见 update()
@@ -153,33 +157,20 @@ class StuckDetector:
         tol = STUCK_POSITION_TOLERANCE_PX / self._px_per_unit
         return _norm_dist(a, b) <= tol
 
-    def _count_same_spot(self, points: list[tuple[float, float]]) -> int:
-        """
-        统计窗口里出现次数最多的那个位置出现了几次。
-
-        用众数而不是「相邻两两相同」：模型反复点**同一个**地方时，中间可能夹
-        一次别的动作，用众数比看相邻更稳。
-
-        ⚠️ 但它**识别不了「两个点来回跳」**（A B A B）：窗口只有 STUCK_WINDOW=4，
-          这种模式下众数最多 2，够不到阈值 STUCK_REPEAT_THRESHOLD=3。
-          （旧注释曾写「A/B/A/B 也要能识别」，与实际不符，2026-10-05 核实后删除。）
-          真机日志里没出现过这种卡死，暂不为此改逻辑 —— 因为「两点来回跳就判卡死」
-          会误杀正常操作（如反复开关同一个设置项、点输入框→点发送）。
-        """
-        best = 0
-        for i, p in enumerate(points):
-            n = sum(1 for q in points if self._same_spot(p, q))
-            best = max(best, n)
-        return best
-
     def _count_stuck_clicks(self) -> int:
         """
         统计窗口里「**打在同一个点、且界面没变**」的最大次数。
 
-        ★ 为什么要加「界面没变」（2026-10-05，Claude 审查 10.1）：
+        ★ 为什么要加「界面没变」（2026-10-05）：
           只看「是不是同一个点」，会把**计算器连按数字、步进器连点加减、
           翻页按钮连点**都误判成卡死并终止任务。界面变了 = 有进展，不算卡死。
         ★ 指纹未知（None，调用方没给）时**退回旧判据**（只看点），保持向后兼容。
+
+        ⚠️ 它（以及旧版那个只数「众数」的 `_count_same_spot`）**识别不了
+          「两个点来回跳」**（A B A B）：窗口只有 STUCK_WINDOW=4，这种模式下最多
+          计数到 2，够不到阈值 3。真机日志里没出现过这种卡死，暂不为此改逻辑 ——
+          因为「两点来回跳就判卡死」会误杀正常操作（反复开关同一设置项、点输入框→点发送）。
+          （`_count_same_spot` 已无生产调用，2026-10-05 清理删除，其说明并入此处。）
         """
         best = 0
         pts, fps = self.clicks, self._click_fps
@@ -199,12 +190,11 @@ class StuckDetector:
         """
         放行一次「连续 TYPE」：清零计数并记下原因。
 
-        ★ 用途（2026-10-05，Claude 审查 10.3）：拦之前回读到输入框是**空的** ——
+        ★ 用途（2026-10-05）：拦之前回读到输入框是**空的** ——
           说明上一句已经发出去了（或上次输入本来就没上屏），
           这是合法的「再打一句」，不该被连续 TYPE 保护拦下。
         """
         self.consecutive_type = 0
-        self._blocked_type = False
         self._unknown_click = False
         self.last_reset_note = note
 
@@ -240,7 +230,6 @@ class StuckDetector:
                 if click_checked:
                     if click_on_input is True:
                         self.consecutive_type = 0
-                        self._blocked_type = False
                         self._unknown_click = False
                         self.last_reset_note = (
                             f"CLICK ({p[0]:.0f},{p[1]:.0f}) 命中输入框 -> 计数清零")
@@ -374,10 +363,24 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
     real_w, real_h = real_size
 
     def to_real(point: Any) -> tuple[int, int]:
-        """把 0-1000 归一化坐标换成真实像素，并夹紧到屏幕范围内。"""
+        """
+        把 0-1000 归一化坐标换成真实像素。
+
+        ★ 越界**拒绝执行**，不再「夹回屏幕边」（2026-10-05）：
+          旧实现 `min(max(...), w-1)` 会把明显越界的坐标**静默**拉到屏幕边缘 ——
+          模型给 1040 就点在最右一列；SLIDE 两端都越界时被夹成**同一点**，
+          `input swipe` 退化成原地长按，页面纹丝不动却报「滑动成功」。
+          vision 早已声明「不再硬拉回屏幕边」，这里对齐：越界即抛
+          InvalidActionError，由调用方转成「这一步失败」，交给模型重试。
+          （末尾的 min 只用于消除浮点舍入导致的越界，不改变语义。）
+        """
         nx, ny = parse_point(point)
-        x = min(max(int(round(nx / 1000 * real_w)), 0), real_w - 1)
-        y = min(max(int(round(ny / 1000 * real_h)), 0), real_h - 1)
+        if not (0 <= nx <= 1000 and 0 <= ny <= 1000):
+            raise InvalidActionError(
+                f"坐标 ({nx:g}, {ny:g}) 越界（超出 0-1000 归一化范围）—— 已拒绝执行"
+                f"（不再夹回屏幕边缘），请重新给出坐标")
+        x = min(int(round(nx / 1000 * real_w)), real_w - 1)
+        y = min(int(round(ny / 1000 * real_h)), real_h - 1)
         return x, y
 
     if name == "COMPLETE":
@@ -385,13 +388,19 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
                           result_text=str(action.get("value", "")))
 
     if name == "CLICK":
-        x, y = to_real(action["point"])
+        try:
+            x, y = to_real(action["point"])
+        except InvalidActionError as exc:
+            return ExecResult(False, str(exc))
         if not dry_run:
             tap(x, y, device)
         return ExecResult(True, f"点击 ({x}, {y})")
 
     if name == "LONGPRESS":
-        x, y = to_real(action["point"])
+        try:
+            x, y = to_real(action["point"])
+        except InvalidActionError as exc:
+            return ExecResult(False, str(exc))
         duration_ms = int(float(action.get("duration", DEFAULT_LONGPRESS_DURATION)) * 1000)
         if not dry_run:
             # 原地滑动 = 长按（adb 原生没有 longpress 子命令）
@@ -399,8 +408,11 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
         return ExecResult(True, f"长按 ({x}, {y}) {duration_ms}ms")
 
     if name == "SLIDE":
-        x1, y1 = to_real(action["point1"])
-        x2, y2 = to_real(action["point2"])
+        try:
+            x1, y1 = to_real(action["point1"])
+            x2, y2 = to_real(action["point2"])
+        except InvalidActionError as exc:
+            return ExecResult(False, str(exc))
         duration_ms = int(float(action.get("duration", DEFAULT_SLIDE_DURATION)) * 1000)
         if not dry_run:
             swipe(x1, y1, x2, y2, duration_ms, device)
@@ -408,7 +420,7 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
 
     if name == "TYPE":
         text = str(action.get("value", ""))
-        # ★ 日志里只写**脱敏后**的正文（2026-10-05，Claude 审查 B4）：
+        # ★ 日志里只写**脱敏后**的正文（2026-10-05）：
         #   下面的 ExecResult.note 会被 runner 打进日志文件，而正文可能是
         #   密码 / 验证码 / 私密消息。喂给模型的 history 仍用原文（见 runner）。
         safe = redact_text(text)
@@ -419,18 +431,33 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
         #   实测踩坑：模型点了两下别的地方就直接 TYPE，输入框没聚焦，
         #   yadb 的字哪儿都不去 -> 连续 3 次判失败 -> 退出码 2 -> 用户看到
         #   「助手拒绝发消息」。受控复现证明差别只在聚焦（点一下 414ms 就上屏）。
-        pref_real = to_real(prefer_point) if prefer_point is not None else None
+        pref_real = None
+        if prefer_point is not None:
+            try:
+                pref_real = to_real(prefer_point)
+            except InvalidActionError:
+                # 参考点越界（模型给的坐标在容差边缘）—— 忽略它即可，
+                # 不该因此让整步失败（focus_editable_box 会退回「单个输入框」策略）
+                pref_real = None
         _ready, _note, baseline, is_pwd, ambiguous = focus_editable_box(
-            device, prefer_point=pref_real, verbose=not dry_run)
+            device, prefer_point=pref_real, verbose=True)
 
         # ★★ 多个输入框且无法确定目标 -> 停下询问用户先点击目标框（2026-10-04 加）
         #   不猜测 = 避免把字打进错误的框（打错框会被回读验证误判成功，危害更大）。
+        #   ★ 必须给自定义 headline/conclusion（2026-10-05）：否则
+        #     report_need_human 会用默认措辞打出「需要人工输入（密码）」——
+        #     与真实原因（有多个输入框）**完全不符**，正是本项目最忌讳的「自己给错结论」。
         if ambiguous:
             return ExecResult(
                 False,
                 _note,
                 need_human=True,
-                human_reason="界面有多个输入框但模型未明确点击目标框")
+                human_reason="界面有多个输入框但模型未明确点击目标框",
+                human_headline="[有多个输入框，请人工点击目标框]",
+                human_conclusion=(
+                    f"[结论] 任务【未完成】—— 退出码 {EXIT_NEED_HUMAN} = "
+                    f"界面有多个输入框、无法确定往哪个打字，**不是脚本失败**\n"
+                    f"       请在手机上点一下目标输入框，再重新发起任务。"))
 
         # ★★ 撞上密码框 -> 停下，交给人工（2026-10-01 加）
         #   为什么必须停：① 密码属于敏感信息，不该由脚本代输；
@@ -442,7 +469,12 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
                 False,
                 "检测到密码输入框，已停止 —— 请人工输入密码",
                 need_human=True,
-                human_reason="模型准备往密码框里打字（该框 password=true）")
+                human_reason="模型准备往密码框里打字（该框 password=true）",
+                human_headline="[涉及密码，请人工输入]",
+                human_conclusion=(
+                    f"[结论] 任务【未完成】—— 退出码 {EXIT_NEED_HUMAN} = "
+                    f"需要人工输入密码，**不是脚本失败**\n"
+                    f"       脚本已停在原处，请人工输完后再重新发起任务。"))
 
         # 带验证的输入：yadb 会**静默失败**（返回 code:0 但没上屏），
         # 所以不能信它的返回值，必须回读输入框确认。最多试 TYPE_RETRY 次。
@@ -459,7 +491,7 @@ def execute_action(action: dict[str, Any], real_size: tuple[int, int],
                 print("[注意] 界面不暴露聚焦输入框，无法回读验证 —— "
                       "这一句是否真的上屏请人工确认")
                 return ExecResult(True, f"输入「{safe}」（未能回读验证）")
-            # ★ 成功判据收紧（2026-10-05，mimo 审查 P1-1）：旧写法第二句是
+            # ★ 成功判据收紧（2026-10-05）：旧写法第二句是
             #   「只要输入框内容变了就算成功」—— 于是**被 maxlength 截断**、
             #   或只打出前几个字，都会判成功，模型据此 COMPLETE → 发出半截消息。
             #   现在额外要求「框里的字数不少于我们输入的字数」：
@@ -550,7 +582,12 @@ def report_need_human(device: str | None, img: Image.Image, step: int,
     print(headline)
     print(f"原因：{reason}")
 
-    pkg = current_package(device)
+    # current_package 现在会在 adb 失败时抛 AdbError（见其 docstring）——
+    # 这里只是**信息性**读取（打印当前应用），掉线不该让「报告人工介入」本身也崩。
+    try:
+        pkg = current_package(device)
+    except AdbError:
+        pkg = ""
     if pkg:
         print(f"当前应用：{pkg}")
 

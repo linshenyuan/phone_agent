@@ -6,6 +6,7 @@ import subprocess
 
 from .config import ADB_TIMEOUT, ADB_TIMEOUT_BINARY, USE_RAW_SCREENSHOT
 from .deps import Image
+from .output import info
 import io
 import re
 import shlex
@@ -63,6 +64,11 @@ def adb(*args: str, device: str | None = None, binary: bool = False,
       修法：拼成**一条**已引用的字符串，让设备端 shell 把每个参数当字面量。
       放在这里而不是各调用点 —— 这是唯一出口，一处覆盖全部调用点，
       以后新增调用点自动安全。
+
+    ⚠️ 边界（2026-10-05，别把话说满）：shlex.quote 挡的是 **host 侧
+      传给设备端 shell** 的注入。它**挡不住**设备端 `input` 命令自己的文本处理 ——
+      例如 `input text` 会把 `%s` 替换成空格。当前所有经 `input` 的文本都被上层
+      白名单/字符集限制挡住，属**潜伏坑**，不是已修的洞。
     """
     cmd = [_adb_bin()]
     if device:
@@ -122,7 +128,7 @@ def pick_device(explicit: str | None) -> str | None:
         if explicit not in devices:
             sys.exit(f"指定的设备 {explicit} 不在线。当前在线：{', '.join(devices)}")
         return explicit
-    # ★ 多设备时必须显式指定（2026-10-05 修，Claude 审查 #4）：
+    # ★ 多设备时必须显式指定（2026-10-05 修）：
     #   旧实现直接 `return devices[0]`。对一个会**发消息**的工具来说，
     #   「静默操作了错误的手机」是最糟的结果 —— 宁可报错让用户补 --device。
     if len(devices) > 1:
@@ -169,6 +175,25 @@ def screen_size(device: str | None = None, refresh: bool = False) -> tuple[int, 
 
 
 
+def _open_png(png: bytes) -> Image.Image:
+    """
+    把 PNG 字节解析成 RGB 图片；数据损坏时抛 **AdbError**（不是裸 OSError）。
+
+    ★ 为什么必须包一层（2026-10-05）：`Image.open` 遇到空 / 垃圾 /
+      截断数据会抛 `UnidentifiedImageError` —— 它**是 OSError 但不是 AdbError**。
+      而 runner 的截图分支只 `except AdbError`，于是这类异常会**逃出 run()**、
+      以未捕获 traceback 崩溃，本该走的「连续黑屏 -> 请人工解锁」流程也失效。
+      统一包成 AdbError 后，上层就能正常收尾并留下 `[结论]` 行。
+    """
+    try:
+        return Image.open(io.BytesIO(png)).convert("RGB")
+    except OSError as exc:
+        raise AdbError(
+            f"截图数据无法解析为图片（{type(exc).__name__}: {exc}）"
+            f"—— 设备可能返回了空 / 损坏的截图"
+        ) from exc
+
+
 def screenshot(device: str | None = None) -> Image.Image:
     """
     抓取手机当前屏幕。
@@ -200,17 +225,25 @@ def screenshot(device: str | None = None) -> Image.Image:
     if not USE_RAW_SCREENSHOT:
         png = adb("exec-out", "screencap", "-p", device=device, binary=True)
         assert isinstance(png, bytes)
-        return Image.open(io.BytesIO(png)).convert("RGB")
+        return _open_png(png)
 
     raw = adb("exec-out", "screencap", device=device, binary=True)
     assert isinstance(raw, bytes)
 
-    # ① 带 16 字节 header（实测本机 Android 10 / vivo 走这条）
-    if len(raw) >= 16:
+    # ① 带 header 的 RAW：新版 16 字节（宽/高/格式/色彩空间），
+    #    旧版 Android 7/8 只有 12 字节（宽/高/格式，AOSP 早期省略色彩空间）。
+    #    ★ 12 字节分支（2026-10-05）：旧实现只认 16 字节 → 老机型
+    #      恒定静默退回 PNG，每帧多约 1.6 秒且**没有任何日志**（正是本项目自己
+    #      警告过的「静默降级必须可观测」）。现在两条都认，且降级路径会打日志。
+    if len(raw) >= 12:
         hw = int.from_bytes(raw[0:4], "little")
         hh = int.from_bytes(raw[4:8], "little")
-        if 0 < hw < 100000 and 0 < hh < 100000 and len(raw) == hw * hh * 4 + 16:
-            return Image.frombytes("RGBA", (hw, hh), raw[16:]).convert("RGB")
+        if 0 < hw < 100000 and 0 < hh < 100000:
+            if len(raw) == hw * hh * 4 + 16:
+                return Image.frombytes("RGBA", (hw, hh), raw[16:]).convert("RGB")
+            if len(raw) == hw * hh * 4 + 12:
+                info("[截图] 识别到 12 字节 header（旧版 Android 7/8），按 12 字节偏移解析")
+                return Image.frombytes("RGBA", (hw, hh), raw[12:]).convert("RGB")
 
     # ② 无 header 的裸像素
     w, h = screen_size(device)
@@ -225,9 +258,13 @@ def screenshot(device: str | None = None) -> Image.Image:
         return Image.frombytes("RGBA", (w, h), raw).convert("RGB")
 
     # ③ 尺寸始终对不上 -> 退回 PNG
+    #    ★ 打日志（2026-10-05）：静默降级是「变慢了却查不出原因」的典型
+    #      —— 当初漏认 header 就是这么被坑的。这里明确记下长度与推算尺寸，便于排查。
+    info(f"[截图] RAW 尺寸对不上（收到 {len(raw)} 字节，推算 {w}x{h}*4={w * h * 4}）"
+         f"—— 退回 PNG（慢约 1.6 秒）")
     png = adb("exec-out", "screencap", "-p", device=device, binary=True)
     assert isinstance(png, bytes)
-    return Image.open(io.BytesIO(png)).convert("RGB")
+    return _open_png(png)
 
 
 

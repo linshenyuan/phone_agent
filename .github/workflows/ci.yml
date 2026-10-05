@@ -14,9 +14,14 @@ jobs:
         python-version: ["3.10", "3.12", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      # ★ 第三方 action 固定到 commit SHA（供应链最佳实践，2026-10-05）：
+      #   用 tag（如 @v4）会被上游**静默改写**指向新代码；固定 SHA 才能保证跑的是审计过的版本。
+      #   注释里的版本号仅供人工识别，升级时改 SHA 并同步注释。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065   # v5
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -27,6 +32,13 @@ jobs:
 
       - name: 语法检查
         run: python -m compileall -q src/ run.py
+
+      # ★ 跑单元测试（2026-10-05）：项目已积累 89 个用例却从未在 CI 执行 ——
+      #   等于没有回归网。PYTHONPATH=src 让 `import phone_agent` 可用（src 布局）。
+      - name: 单元测试（不需要手机与模型服务）
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
 
       - name: 冒烟测试（不需要手机与模型服务）
         run: |
