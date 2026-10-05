@@ -209,6 +209,10 @@ my_project/
 │   ├── actions.py      445 行   动作执行 + 卡死检测
 │   ├── runner.py       323 行   主循环
 │   └── phone_agent.py  140 行   命令行入口
+├── tests/                      离线测试（标准库 unittest，不碰真机/模型）
+│   ├── fakes.py                假件与打桩工具
+│   ├── test_runner_flow.py     主循环控制流
+│   └── test_regressions.py     已修真机坑的回归
 └── log/  tmp/                  ← 运行时自动创建，已在 .gitignore（不随仓库分发）
 ```
 
@@ -236,6 +240,24 @@ my_project/
 | **换模型需重新验证提示词** | `vision.PROMPT_TEMPLATE` 里的坐标格式（0-1000 归一化）与动作名（`CLICK`/`SLIDE`/`TYPE`…）**是绑在 GELab-Zero-4B 训练数据上的**。换成本地其他模型或云端模型后，模型可能不按此格式输出 —— 需先改提示词并实测 |
 | **纯打开任务也需模型服务** | `main()` 里的服务探测早于短路判断 |
 | **安全输入场景会失效** | 密码/验证码框会强制切系统安全键盘，yadb 也注入不进去 |
+
+## 测试
+
+纯离线，**不需要手机、不需要模型服务**（外部依赖全部打桩）：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+| 文件 | 测什么 |
+|---|---|
+| `tests/test_runner_flow.py` | 主循环**控制流**：退出码、被拦后是否继续决策、失败是否写进历史、卡死 / 人工介入 / 步数耗尽 / 纯打开短路 |
+| `tests/test_regressions.py` | 把修过的真机坑冻住：坐标越界、WAIT 范围、App 精确解析、纯打开别名顺序、日志同名后缀 |
+
+- 用标准库 `unittest`，**不需要装 pytest**。
+- `tests/fakes.py` 提供假件（假截图 / 假模型 / 打桩工具），不碰真机、不往仓库或用户目录落盘。
+- **`src/` 下没有任何测试专用代码** —— 全靠 `unittest.mock` 替换 `phone_agent.runner` 里的模块级名字。
+- 为什么专门测控制流：2026-09-29 踩过「单测只模拟动作序列、没模拟 `continue`，两个错误互相抵消 → 单测全绿而真机出错」的坑。
 
 ## 致谢与第三方许可
 
