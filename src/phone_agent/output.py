@@ -38,8 +38,19 @@ class _Tee:
 def _open_log() -> Any:
     """开一个带时间戳的日志文件，并清理超量的旧日志。"""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    path = LOG_DIR / f"run_{time.strftime('%Y%m%d_%H%M%S')}.log"
-    handle = open(path, "w", encoding="utf-8")
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    # ★ 同名兜底（2026-10-05）：时间戳只精确到秒，同一秒启动两个进程会撞名，
+    #   直接 open("w") 会把先者的日志截断（丢数据）。这里改用**独占创建**（mode="x"），
+    #   撞名就依次加 _1 / _2 …，各写各的、绝不覆盖。
+    #   （"x" 是原子操作，比先 exists() 再 open 更稳 —— 后者有 TOCTOU 竞争窗口。）
+    n = 0
+    while True:
+        name = f"run_{stamp}.log" if n == 0 else f"run_{stamp}_{n}.log"
+        try:
+            handle = open(LOG_DIR / name, "x", encoding="utf-8")
+            break
+        except FileExistsError:
+            n += 1
 
     # 清理：按修改时间倒序，只留最近 LOG_KEEP 份。失败不影响主流程。
     try:
