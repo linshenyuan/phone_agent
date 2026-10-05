@@ -86,3 +86,4 @@
 | 「任务达成后立即 COMPLETE」 | `_is_pure_open_task()` 短路 |
 | 「密码框留给人工」 | `focus_editable_box()` 返回 `is_pwd` → 退出码 4 |
 | 「先 CLICK 输入框再 TYPE」 | 多框无法确定目标时 `focus_editable_box()` 返回 `ambiguous` → 停下询问 |
+| 「用 OPEN 启动 App（填应用名或包名）」 | `resolve_package()` 只认精确别名/包名；连续 2 次解析失败 → 判「不支持的应用」收工 |
