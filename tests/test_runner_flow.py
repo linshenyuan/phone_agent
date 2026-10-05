@@ -129,5 +129,39 @@ class RunnerFlow(unittest.TestCase):
         self.assertLess(len(h.exec_calls), 10, "卡死应在步数耗尽前就终止")
 
 
+class 拦前回读输入框(unittest.TestCase):
+    """★ Claude 审查 10.3：连续 TYPE 被拦前先回读输入框，空则放行。"""
+
+    def test_回读为空则放行照常执行(self):
+        # CLICK → TYPE → TYPE：第 3 步本该被拦；回读输入框为空 -> 应放行
+        actions = [CLICK(), TYPE("你好"), TYPE("世界"), COMPLETE]
+        with runner_env(actions,
+                        overrides={"read_focused_text": lambda device=None: ""}) as h:
+            rc = run_task("打开设置", max_steps=4)
+        self.assertEqual(len(h.exec_calls), 4, "回读为空时应放行")
+        self.assertEqual(rc, 0)
+
+    def test_读不到输入框时仍保守拦下(self):
+        actions = [CLICK(), TYPE("你好"), TYPE("世界"), COMPLETE]
+        with runner_env(actions,
+                        overrides={"read_focused_text": lambda device=None: None}) as h:
+            rc = run_task("打开设置", max_steps=4)
+        self.assertEqual(len(h.exec_calls), 3, "读不到输入框时应保守拦下")
+
+
+class 黑屏时停下问人工(unittest.TestCase):
+    """★ Claude 审查 阅读6：连续全黑 -> 退出码 4，不盲操作。"""
+
+    def test_连续黑屏退出码4(self):
+        from fakes import FakeImage
+        black = FakeImage(color=(0, 0, 0))
+        with runner_env([CLICK()], overrides={"screenshot": lambda device=None: black}) as h:
+            rc = run_task("打开设置", max_steps=5)
+        self.assertEqual(rc, 4, "连续黑屏应停下问人工")
+        self.assertTrue(h.report_calls)
+        # BLANK_FRAME_MAX=2：第 1 步先观察（防把深色界面误判成黑屏），第 2 步才停
+        self.assertLessEqual(h.model_calls, 1, "连续黑屏应尽快停下，不该一直烧模型")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

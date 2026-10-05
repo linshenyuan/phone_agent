@@ -20,7 +20,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from phone_agent.actions import StuckDetector                       # noqa: E402
+from fakes import FakeImage                                         # noqa: E402
+
+from phone_agent.actions import (StuckDetector, is_blank_frame,     # noqa: E402
+                                 screen_fingerprint)
 from phone_agent.config import (MAX_CONSECUTIVE_TYPE,               # noqa: E402
                                 MAX_SLIDE_TOTAL, STUCK_REPEAT_THRESHOLD)
 
@@ -122,6 +125,63 @@ class 滑动(unittest.TestCase):
         for _ in range(3):
             reason = d.update(S()) or reason
         self.assertIsNotNone(reason, "同一次滑动反复应判卡死（页面没滚动）")
+
+
+class 界面指纹与卡死(unittest.TestCase):
+    """★ Claude 审查 10.1：同点连点**且界面没变**才算卡死。"""
+
+    def test_同点且界面没变_才判卡死(self):
+        d = sd()
+        reason = None
+        for _ in range(STUCK_REPEAT_THRESHOLD):
+            reason = d.update(C(500, 800), screen_fp=12345) or reason
+        self.assertIsNotNone(reason)
+
+    def test_同点但界面在变_不判卡死(self):
+        # 计算器连按数字 / 步进器连点 / 翻页连点 —— 界面每步都在变 = 有进展
+        d = sd()
+        for fp in (1, 2, 3, 4):
+            self.assertIsNone(d.update(C(500, 800), screen_fp=fp),
+                              "界面有变化 = 有进展，不该判卡死")
+
+    def test_不传指纹时退回旧判据(self):
+        # 向后兼容：调用方没给界面指纹时，仍按「只看点」判
+        d = sd()
+        reason = None
+        for _ in range(STUCK_REPEAT_THRESHOLD):
+            reason = d.update(C(500, 800)) or reason
+        self.assertIsNotNone(reason)
+
+    def test_指纹函数对真实图片有效(self):
+        self.assertNotEqual(screen_fingerprint(FakeImage(color=(0, 0, 0))),
+                            screen_fingerprint(FakeImage(color=(255, 255, 255))))
+        self.assertEqual(screen_fingerprint(FakeImage(color=(10, 20, 30))),
+                         screen_fingerprint(FakeImage(color=(10, 20, 30))))
+
+
+class 黑屏检测(unittest.TestCase):
+    """★ Claude 审查 阅读6：锁屏 / FLAG_SECURE / 息屏会让截图全黑。"""
+
+    def test_纯黑算黑屏(self):
+        self.assertTrue(is_blank_frame(FakeImage(color=(0, 0, 0))))
+
+    def test_正常画面不算黑屏(self):
+        self.assertFalse(is_blank_frame(FakeImage(color=(32, 32, 32))))
+        self.assertFalse(is_blank_frame(FakeImage(color=(255, 255, 255))))
+
+
+class 发送后放行TYPE(unittest.TestCase):
+    """★ Claude 审查 10.3：发送成功后要再打一句，不该被连续 TYPE 保护拦下。"""
+
+    def test_回读为空则清零放行(self):
+        d = sd()
+        d.update(C(500, 800))
+        d.update(T())
+        d.update(T())
+        self.assertTrue(d.should_block(T()))
+        d.reset_type_guard("回读到输入框为空")
+        self.assertFalse(d.should_block(T()))
+        self.assertEqual(d.consecutive_type, 0)
 
 
 if __name__ == "__main__":

@@ -6,14 +6,15 @@ import json
 import time
 from typing import Any
 
-from .actions import StuckDetector, execute_action, report_need_human
+from .actions import (StuckDetector, execute_action, is_blank_frame,
+                      report_need_human, screen_fingerprint)
 from .adb import AdbError, screenshot
 from .apps import current_package, detect_app_in_task, ensure_yadb, launch_app, reset_to_home
-from .config import (APP_ALIASES_FILE, TMP_DIR, EXIT_NEED_HUMAN,
+from .config import (APP_ALIASES_FILE, BLANK_FRAME_MAX, TMP_DIR, EXIT_NEED_HUMAN,
                      MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, OPEN_FAIL_STREAK_MAX)
 from .output import info, prune_tmp, redact_text
 from .tasks import _is_pure_open_task, _is_trivial_task, _looks_like_text_task
-from .ui import point_hits_editable, visible_texts
+from .ui import point_hits_editable, read_focused_text, visible_texts
 from .vision import ask_model, parse_point, resize_for_model
 from .deps import OpenAI
 
@@ -125,6 +126,8 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
     finished_but_suspect = False
     # ★ 连续 OPEN 失败计数（2026-10-05 加）：到 OPEN_FAIL_STREAK_MAX 就判「不支持的应用」收工
     open_fail_streak = 0
+    # ★ 连续黑屏步数（2026-10-05 加）：到 BLANK_FRAME_MAX 就停下问人工
+    blank_streak = 0
 
     for step in range(1, max_steps + 1):
         try:
@@ -136,6 +139,31 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
         # 卡死检测器按真实屏幕尺寸构造，容差用像素算、比较用归一化坐标
         if step == 1:
             stuck = StuckDetector(real_img.width, real_img.height)
+
+        # ★ 界面粗指纹（2026-10-05，Claude 审查 10.1）：给卡死检测用 ——
+        #   判断「点不动」时界面到底有没有变。计算器连按数字 / 步进器连点 /
+        #   翻页连点都会让界面变，不该被判成卡死。
+        screen_fp = screen_fingerprint(real_img)
+
+        # ★ 黑屏检测（2026-10-05，Claude 审查 阅读6）：锁屏 / FLAG_SECURE / 息屏时
+        #   截图是纯黑的，模型看不见任何东西却照样「决策」= 盲操作。
+        #   连续 BLANK_FRAME_MAX 步全黑就停下问人工（**不自动解锁** —— 解锁要密码）。
+        if not dry_run and is_blank_frame(real_img):
+            blank_streak += 1
+            info(f"[黑屏] 第 {step} 步截图几乎全黑（连续 {blank_streak} 次）")
+            if blank_streak >= BLANK_FRAME_MAX:
+                report_need_human(
+                    device, real_img, step,
+                    "截图连续多次几乎全黑 —— 手机可能已锁屏 / 息屏，"
+                    "或当前应用禁止截屏（FLAG_SECURE）",
+                    headline="[屏幕全黑，请人工接手]",
+                    conclusion=(
+                        f"[结论] 任务【未完成】—— 退出码 {EXIT_NEED_HUMAN} = "
+                        f"屏幕全黑，**不是脚本失败**\n"
+                        f"       请解锁手机、或换到可截屏的界面后重新发起任务。"))
+                return EXIT_NEED_HUMAN
+        else:
+            blank_streak = 0
 
         info(f"\n{'=' * 56}")
         info(f"第 {step}/{max_steps} 步   屏幕 {real_img.width}x{real_img.height}"
@@ -172,7 +200,8 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
         # 因为 agent 一旦卡住，后续动作全是重复的，继续跑只会污染现场。
         stuck_reason = stuck.update(action,
                                     click_on_input=click_on_input,
-                                    click_checked=click_checked)
+                                    click_checked=click_checked,
+                                    screen_fp=screen_fp)
         if stuck_reason:
             print(f"\n{'=' * 56}")
             print(f"[卡死] 第 {step} 步判定为原地打转，提前终止")
@@ -183,7 +212,19 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
         # 拦截：不终止任务，只跳过这一步，让模型换别的手段。
         #   * 连续 TYPE —— 模型点不中发送按钮时会反复追加文字，退化成 200 字乱码
         #   * 滑动超限 —— 目标明明已经可见，它还在无意义地滑（2026-10-01 加）
-        if stuck.should_block(action):
+        block = stuck.should_block(action)
+        # ★ 拦之前先回读输入框（2026-10-05，Claude 审查 10.3）：框是**空的** ->
+        #   说明上一句已经发出去了（或上次输入本来就没上屏），这是合法的「再打一句」。
+        #   旧实现会在这里无谓拦下，提示还错说「输入框里已有内容」。
+        #   读不到（None）时保守起见**仍然拦**。
+        if (block
+                and str(action.get("action_type", "")).upper() == "TYPE"
+                and not dry_run and read_focused_text(device) == ""):
+            info("[放行] 回读到输入框是空的 —— 上一句应该已经发出去了，允许再输入")
+            stuck.reset_type_guard("回读到输入框为空 -> 视为已发送，放行一次 TYPE")
+            block = False
+
+        if block:
             # ★ 判断不出输入框、且模型仍要「连打第二次」-> 停下报告，交给人工（2026-10-04 加）
             #   为什么不再默默跳过：判断不出通常是界面读不透（Flutter/WebView），
             #   这时小模型极易反复 TYPE 把文字叠成乱码，停下来让人接手更安全。

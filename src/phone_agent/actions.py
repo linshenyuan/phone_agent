@@ -8,7 +8,7 @@ from typing import Any
 
 from .adb import AdbError, adb, keyevent, swipe, tap
 from .apps import current_package, input_text, launch_app
-from .config import TMP_DIR, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, EXIT_NEED_HUMAN, MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, STUCK_POSITION_TOLERANCE_PX, STUCK_REPEAT_THRESHOLD, STUCK_SLIDE_REPEAT_THRESHOLD, STUCK_TYPE_REPEAT_THRESHOLD, STUCK_WINDOW, TYPE_CLEAR_MAX, TYPE_RETRY, TYPE_VERIFY_DELAY, WAIT_SECONDS_DEFAULT, WAIT_SECONDS_MAX
+from .config import TMP_DIR, BLANK_FRAME_LEVEL, BLANK_FRAME_RATIO, DEFAULT_LONGPRESS_DURATION, DEFAULT_SLIDE_DURATION, EXIT_NEED_HUMAN, MAX_CONSECUTIVE_TYPE, MAX_SLIDE_TOTAL, SCREEN_FP_SIZE, SCREEN_FP_STATUS_BAR, STUCK_POSITION_TOLERANCE_PX, STUCK_REPEAT_THRESHOLD, STUCK_SLIDE_REPEAT_THRESHOLD, STUCK_TYPE_REPEAT_THRESHOLD, STUCK_WINDOW, TYPE_CLEAR_MAX, TYPE_RETRY, TYPE_VERIFY_DELAY, WAIT_SECONDS_DEFAULT, WAIT_SECONDS_MAX
 from .output import info, prune_tmp, redact_text
 from .ui import focus_editable_box, read_focused_text
 from .vision import parse_point
@@ -41,6 +41,48 @@ def _norm_dist(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 
 
+def screen_fingerprint(img: Image.Image) -> int:
+    """
+    截图的**粗指纹**（8×8 灰度均值哈希），用来判断「界面到底有没有变化」。
+
+    ★ 为什么要它（2026-10-05，Claude 审查 10.1）：旧判据只看「是不是打在同一个点」，
+      于是计算器连按数字、步进器连点加减、「下一页」连点都会被判成卡死并终止任务。
+      加上「界面没变」这一条：变了 = 有进展，不算卡死。
+
+    ★ 分辨率是**可调**的（`SCREEN_FP_SIZE`，默认 16×16）：先裁掉顶部状态栏
+      （时钟一直在跳），再缩到该尺寸。调大更灵敏、调小更抗动画干扰。
+    """
+    w, h = img.size
+    top = int(h * SCREEN_FP_STATUS_BAR)
+    small = img.crop((0, top, w, h)).convert("L").resize((SCREEN_FP_SIZE, SCREEN_FP_SIZE))
+    px = list(small.getdata())
+    avg = sum(px) / len(px)
+    bits = 0
+    for i, v in enumerate(px):
+        if v >= avg:
+            bits |= 1 << i
+    # ★ 再拼一个**粗亮度**分量（32 档）：纯均值哈希对「均匀图」是退化的 ——
+    #   全黑和全白的结构比特完全相同（都是全 1），于是「黑屏 -> 白屏」会被判成
+    #   「界面没变」。补上亮度档位才能区分这种纯色切换（2026-10-05 实测发现）。
+    #   ⚠️ 偏移量必须跟着 SCREEN_FP_SIZE 走（结构位占 SIZE² 位）—— 写死 64 的话，
+    #      调大分辨率后亮度会**撞进结构位**，指纹直接错乱。
+    return bits | ((int(avg) >> 3) << (SCREEN_FP_SIZE * SCREEN_FP_SIZE))
+
+
+def is_blank_frame(img: Image.Image) -> bool:
+    """
+    整屏是不是**近黑**（锁屏 / FLAG_SECURE / 息屏的典型表现）。
+
+    ★ 为什么要它（2026-10-05，Claude 审查 阅读6）：这些情况下截图是纯黑的，
+      模型看不见任何东西却照样「决策」= 盲操作，结果完全不可预期。
+      检出后由调用方**停下问人工**（不自动解锁 —— 解锁要密码，不该代做）。
+    """
+    small = img.convert("L").resize((64, 64))
+    px = list(small.getdata())
+    dark = sum(1 for v in px if v < BLANK_FRAME_LEVEL)
+    return dark >= BLANK_FRAME_RATIO * len(px)
+
+
 class StuckDetector:
     """
     判断 agent 是不是在原地打转，并说明理由。
@@ -70,6 +112,9 @@ class StuckDetector:
         # 归一化坐标的一个单位 ≈ 多少像素。用长边算，宁可宽松也不要误判。
         self._px_per_unit = max(real_w, real_h) / 1000.0
         self.clicks: list[tuple[float, float]] = []
+        # ★ 每次点击时界面的粗指纹（与 self.clicks 一一对应，2026-10-05 加）：
+        #   判断「点不动」时要看界面有没有变，否则计算器/步进器会被误判成卡死。
+        self._click_fps: list[int | None] = []
         self.types: list[str] = []
         self.slides: list[tuple[tuple[float, float], tuple[float, float]]] = []
         self.hits: list[str] = []
@@ -114,11 +159,48 @@ class StuckDetector:
             best = max(best, n)
         return best
 
+    def _count_stuck_clicks(self) -> int:
+        """
+        统计窗口里「**打在同一个点、且界面没变**」的最大次数。
+
+        ★ 为什么要加「界面没变」（2026-10-05，Claude 审查 10.1）：
+          只看「是不是同一个点」，会把**计算器连按数字、步进器连点加减、
+          翻页按钮连点**都误判成卡死并终止任务。界面变了 = 有进展，不算卡死。
+        ★ 指纹未知（None，调用方没给）时**退回旧判据**（只看点），保持向后兼容。
+        """
+        best = 0
+        pts, fps = self.clicks, self._click_fps
+        for i, p in enumerate(pts):
+            fi = fps[i] if i < len(fps) else None
+            n = 0
+            for j, q in enumerate(pts):
+                if not self._same_spot(p, q):
+                    continue
+                fj = fps[j] if j < len(fps) else None
+                if fi is None or fj is None or fi == fj:
+                    n += 1
+            best = max(best, n)
+        return best
+
+    def reset_type_guard(self, note: str) -> None:
+        """
+        放行一次「连续 TYPE」：清零计数并记下原因。
+
+        ★ 用途（2026-10-05，Claude 审查 10.3）：拦之前回读到输入框是**空的** ——
+          说明上一句已经发出去了（或上次输入本来就没上屏），
+          这是合法的「再打一句」，不该被连续 TYPE 保护拦下。
+        """
+        self.consecutive_type = 0
+        self._blocked_type = False
+        self._unknown_click = False
+        self.last_reset_note = note
+
     # -- 对外接口 --------------------------------------------------
 
     def update(self, action: dict[str, Any],
                click_on_input: bool | None = None,
-               click_checked: bool = False) -> str | None:
+               click_checked: bool = False,
+               screen_fp: int | None = None) -> str | None:
         """
         喂入一个动作，返回卡死原因；没卡死返回 None。
 
@@ -126,6 +208,10 @@ class StuckDetector:
                                （True / False / None=看不清），由调用方读界面树判断。
         :param click_checked:  调用方这次**有没有去判断**（False 表示没查，
                                通常因为当前没有待清的连续 TYPE 计数）。
+        :param screen_fp:      这次动作**执行前**的界面粗指纹（`screen_fingerprint()`）。
+                               传了就要求「同点连点 **且界面没变**」才算卡死 ——
+                               否则计算器连按数字、步进器连点会被误判（2026-10-05）。
+                               不传则退回旧判据（只看点）。
         :return: 人类可读的卡死描述，命中后调用方应立即终止任务
         """
         name = str(action.get("action_type", "")).upper()
@@ -163,11 +249,13 @@ class StuckDetector:
 
                 self.clicks.append(p)
                 self.clicks = self.clicks[-STUCK_WINDOW:]
-                n = self._count_same_spot(self.clicks)
+                self._click_fps.append(screen_fp)
+                self._click_fps = self._click_fps[-STUCK_WINDOW:]
+                n = self._count_stuck_clicks()
                 if n >= STUCK_REPEAT_THRESHOLD:
                     return (f"最近 {len(self.clicks)} 次点击里有 {n} 次打在附近同一处"
-                            f"（容差 {STUCK_POSITION_TOLERANCE_PX}px）—— 点不动，"
-                            f"多半是目标控件没响应或已被遮挡")
+                            f"**且界面没变**（容差 {STUCK_POSITION_TOLERANCE_PX}px）"
+                            f"—— 点不动，多半是目标控件没响应或已被遮挡")
 
         elif name == "TYPE":
             text = str(action.get("value", ""))

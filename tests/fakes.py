@@ -19,18 +19,46 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+from PIL import Image as _PILImage
+
 # 让 `import phone_agent` 可用（src 布局）
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
 class FakeImage:
-    """假截图：只需 runner 用到的 `.width` / `.height` / `.size` 和 `.save()`。"""
+    """
+    假截图：除了 runner 用到的 `.width/.height/.size/.save()`，
+    还要支持 `crop/convert/resize` —— 界面指纹与黑屏检测会用到。
 
-    def __init__(self, width: int = 1080, height: int = 2408) -> None:
+    为了不每个用例都分配 2.6M 像素，纯色底图在类级别共享（按 size+color 缓存）。
+    """
+
+    _SHARED = None
+    _KEY = None
+
+    def __init__(self, width: int = 1080, height: int = 2408,
+                 color: tuple[int, int, int] = (32, 32, 32)) -> None:
         self.width = width
         self.height = height
         self.size = (width, height)
+        self.color = color
         self.saved: list[str] = []
+
+    def _pil(self):
+        key = (self.width, self.height, self.color)
+        if FakeImage._SHARED is None or FakeImage._KEY != key:
+            FakeImage._SHARED = _PILImage.new("RGB", (self.width, self.height), self.color)
+            FakeImage._KEY = key
+        return FakeImage._SHARED
+
+    def crop(self, box):
+        return self._pil().crop(box)
+
+    def convert(self, mode):
+        return self._pil().convert(mode)
+
+    def resize(self, size):
+        return self._pil().resize(size)
 
     def save(self, path) -> None:
         self.saved.append(str(path))        # 只记录，不真写盘
@@ -135,6 +163,9 @@ def runner_env(actions, *, exec_fn=None, cur_pkg="com.android.settings",
         "launch_app": _launch,
         "visible_texts": lambda device=None: (texts or []),
         "point_hits_editable": lambda device, pt, margin_px=24: hits_editable,
+        # 默认「读不到聚焦输入框」（None）—— 让「拦前回读放行」那条路径保持关闭，
+        # 需要测它的用例自行 overrides
+        "read_focused_text": lambda device=None: None,
         "report_need_human": _report,
         "prune_tmp": lambda *a, **k: None,
         "time": mock.MagicMock(),                 # time.sleep -> 空操作
