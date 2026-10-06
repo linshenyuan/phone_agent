@@ -26,10 +26,22 @@ class AdbError(RuntimeError):
 
 
 def _adb_bin() -> str:
-    """定位 adb 可执行文件；PATH 里没有就报错退出。"""
+    """定位 adb 可执行文件；PATH 里没有就抛 **AdbError**。
+
+    ★ 为什么是抛异常而不是 sys.exit（2026-10-06 修）：
+      调用方写的是 `except AdbError`（apps.resolve_package、runner 共 5 处），
+      而 sys.exit() 抛的是 **SystemExit** —— 它接不住，异常会一路逃出调用栈，
+      让整个进程猝死且**不留 [结论] 行**。
+      最典型的受害者是 resolve_package：它本想「adb 有问题就返回 None」，
+      却因为异常类型不对，把「查不到包名」升级成了「进程直接退出」。
+      抛 AdbError 后，既有的降级路径才真正生效。
+
+      注：pick_device 里的 sys.exit 是**有意保留**的 —— 那是命令行参数错误
+      （设备没指定 / 不在线），由 CLI 入口调用，且有测试断言 SystemExit。
+    """
     exe = shutil.which("adb")
     if not exe:
-        sys.exit(
+        raise AdbError(
             "找不到 adb。请确认已安装 platform-tools 并加入 PATH。\n"
             "下载：https://developer.android.com/tools/releases/platform-tools"
         )
