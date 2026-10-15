@@ -15,7 +15,9 @@ from .config import (APP_ALIASES_FILE, BLANK_FRAME_MAX, TMP_DIR, EXIT_NEED_HUMAN
 from .output import info, prune_tmp, redact_text
 from .tasks import (_is_pure_open_task, _is_trivial_task, _looks_like_text_task,
                     _password_prompt_hit, _task_may_need_password)
-from .ui import point_hits_editable, read_focused_text, visible_texts
+from .ui import (dump_nodes, is_tree_usable, parse_click_target,
+                 point_hits_editable, read_focused_text, render_tree_text,
+                 try_rule_click, visible_texts)
 from .vision import ask_model, parse_point, resize_for_model
 from .deps import OpenAI
 
@@ -178,6 +180,8 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
     open_fail_streak = 0
     # ★ 连续黑屏步数（2026-10-05 加）：到 BLANK_FRAME_MAX 就停下问人工
     blank_streak = 0
+    # ★ P3：同一单步点击目标只规则命中一次 —— 否则「点击发送」会无限重复点
+    rule_clicked: set[str] = set()
 
     for step in range(1, max_steps + 1):
         try:
@@ -223,11 +227,40 @@ def run(task: str, device: str | None, client: OpenAI, model: str,
              f"   喂给模型 {view_img.width}x{view_img.height}")
         info("=" * 56)
 
-        try:
-            action = ask_model(client, model, view_img, task, history)
-        except Exception as exc:
-            return _conclude(1, f"[错误] 模型调用失败：{exc}",
-                             "模型服务无响应或报错，**不是任务本身失败**")
+        # ---- UI 树通道（P2）：树可用就把元素树一起喂模型（定位更准、省 token）----
+        #   ★ 保留截图（用户定）：树文本是**补充**，不是替代 —— 图标/图形按钮
+        #     只有图上有，树里是空的。树不可用时 tree_text 为空，提示词与改造前
+        #     逐字一致，等于原路。
+        tree_text = ""
+        action: dict[str, Any] | None = None
+        if not dry_run:
+            nodes = dump_nodes(device)
+            if is_tree_usable(nodes):
+                target = parse_click_target(task)
+                if target and target in rule_clicked:
+                    # 同一目标已用规则点过 -> 交模型（避免无脑重复点同一元素）
+                    tree_text = render_tree_text(nodes)
+                    info(f"[规则] 「{target}」已用规则点过，改由模型决策")
+                else:
+                    # P3 规则层：单步点击任务在树里唯一定位 -> 免模型
+                    action = try_rule_click(task, nodes,
+                                            (real_img.width, real_img.height))
+                    if action is not None:
+                        if target:
+                            rule_clicked.add(target)
+                        info(f"[规则] 单步点击任务，用界面树直接定位：{action.get('point')}")
+                    else:
+                        tree_text = render_tree_text(nodes)
+                        info(f"[树] 界面树可用（{len(nodes)} 节点）—— 随提示词一起喂模型")
+            else:
+                info("[树] 界面树不可用（自绘/Flutter/WebView）—— 只用截图")
+        if action is None:
+            try:
+                action = ask_model(client, model, view_img, task, history,
+                                   tree_text=tree_text)
+            except Exception as exc:
+                return _conclude(1, f"[错误] 模型调用失败：{exc}",
+                                 "模型服务无响应或报错，**不是任务本身失败**")
 
         # ★ 日志脱敏（2026-10-05）：TYPE 的正文可能是密码/私密消息，
         #   而日志会落盘长期保留。注意 history 里仍存**原文**（模型要看到自己输过什么）。

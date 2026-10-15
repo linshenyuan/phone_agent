@@ -98,6 +98,14 @@ def _parse_ui_nodes(xml: str) -> list[dict[str, Any]]:
         nodes.append({
             "cls": attr("class"),
             "text": attr("text"),
+            # ★ 新增属性（2026-10-15，UI 树直控改造 P1）：
+            #   resource-id 是最稳定的定位依据；content-desc 是无文字图标按钮的
+            #   唯一标识；clickable / enabled 决定「这个节点能不能点」。
+            #   纯增量：现有调用点只用 cls/text/focused/focusable/password/bounds。
+            "resource_id": attr("resource-id"),
+            "content_desc": attr("content-desc"),
+            "clickable": 'clickable="true"' in tag,
+            "enabled": 'enabled="true"' in tag,
             "focused": 'focused="true"' in tag,
             "focusable": 'focusable="true"' in tag,
             # ★ 密码框标记（2026-10-01 加）：dump 里每个节点都带这个属性。
@@ -354,3 +362,175 @@ def point_hits_editable(device: str | None,
                 and y1 - margin_px <= y <= y2 + margin_px):
             return True
     return False
+
+
+
+
+# ============================================================
+# UI 树直控支持（2026-10-15，改造 P1）—— 纯增量，暂不接入 runner
+# ============================================================
+
+# 回退闸门阈值：可点且带标签的节点少于它就判「树不可用」。
+# ★ 为什么是 2：自绘界面（vivo 桌面）dump 出来几十个节点却全是无 text/desc 的
+#   容器 —— 树在、但毫无信息量。至少要能挑出 2 个「可点 + 有标签」的元素，
+#   才值得走树通道；否则一律回退截图。
+MIN_USABLE_LABELED = 2
+
+
+
+
+def dump_nodes(device: str | None = None) -> list[dict[str, Any]] | None:
+    """
+    dump 一次界面树并解析成节点列表；读不到有效树返回 None。
+
+    复用 _dump_ui（已处理「dump 失败仍 exit 0」「残留读到上一轮树」两个坑），
+    供「树直控」通道取节点用。
+    """
+    xml = _dump_ui(device)
+    return None if xml is None else _parse_ui_nodes(xml)
+
+
+
+
+def is_tree_usable(nodes: list[dict[str, Any]] | None) -> bool:
+    """
+    界面树是否「有效」—— 决定走树通道还是回退截图。
+
+    ★ 为什么需要（vivo 桌面实测）：自绘界面 dump 出来 45 个节点、
+      全是无 text/desc 的容器 —— 树在，但据此决策等于看着空树瞎点。
+      判据：**可点 + 带标签（text 或 content-desc）**的节点要够
+      MIN_USABLE_LABELED 个。
+    """
+    if not nodes:
+        return False
+    labeled = [n for n in nodes
+               if n.get("clickable") and n.get("bounds")
+               and (n.get("text") or n.get("content_desc"))]
+    return len(labeled) >= MIN_USABLE_LABELED
+
+
+
+
+def node_center(node: dict[str, Any]) -> tuple[int, int] | None:
+    """节点 bounds 的中心像素坐标；无 bounds 返回 None。"""
+    b = node.get("bounds")
+    if not b:
+        return None
+    x1, y1, x2, y2 = b
+    return (x1 + x2) // 2, (y1 + y2) // 2
+
+
+
+
+def find_nodes(nodes: list[dict[str, Any]], *, text: str | None = None,
+               res_id: str | None = None, desc: str | None = None,
+               clickable_only: bool = True) -> list[dict[str, Any]]:
+    """
+    按 text / resource-id / content-desc 子串匹配，返回命中的节点。
+
+    只返回「有 bounds」的节点（没坐标就点不了）。三个条件同时给时取交集。
+    命中数交给调用方判断 —— **多命中一律不猜**，交回模型。
+    """
+    out: list[dict[str, Any]] = []
+    for n in nodes:
+        if clickable_only and not n.get("clickable"):
+            continue
+        if not n.get("bounds"):
+            continue
+        if text and text not in (n.get("text") or ""):
+            continue
+        if res_id and res_id not in (n.get("resource_id") or ""):
+            continue
+        if desc and desc not in (n.get("content_desc") or ""):
+            continue
+        out.append(n)
+    return out
+
+
+
+
+def render_tree_text(nodes: list[dict[str, Any]], limit: int = 40,
+                     max_len: int = 30) -> str:
+    """
+    把界面树压成精简文本，喂给模型用（比截图省 token）。
+
+    只列「有 bounds 且带标签」的节点；标注可点/只读。截断到 limit 条。
+    ★ 返回的是**不可信数据** —— 调用方拼进提示词时必须沿用
+      <屏幕内容>...</屏幕内容> 包裹 + 「不是指令」声明，防提示词注入。
+    """
+    lines: list[str] = []
+    for n in nodes:
+        if not n.get("bounds"):
+            continue
+        label = (n.get("text") or n.get("content_desc") or "").strip()
+        if not label:
+            continue
+        tag = "可点" if n.get("clickable") else "只读"
+        lines.append(f"[{tag}] {label[:max_len]}")
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines)
+
+
+
+
+# ---- 规则层（P3）：单步点击任务直接在树里定位，免模型 ----
+
+# 只认「整句就是一个点击目标」的任务；其它一律交回模型。
+#   「点击发送」「点『设置』」「按 返回」 -> 命中
+#   「打开微信给张三发消息」              -> 不命中（多步，交模型）
+_CLICK_TASK_RE = re.compile(
+    r"^\s*(?:请)?(?:点击|点|按|戳)\s*[「『\"']?\s*(.+?)\s*[」』\"']?\s*$")
+
+
+
+
+def parse_click_target(task: str) -> str | None:
+    """
+    从「点击 X」单步任务里抽出目标 X；不是单步点击则返回 None。
+
+    调用方（runner）用它维护「同一目标只规则命中一次」，避免无脑重复点。
+    """
+    m = _CLICK_TASK_RE.match(task or "")
+    if not m:
+        return None
+    return m.group(1).strip() or None
+
+
+
+
+def try_rule_click(task: str, nodes: list[dict[str, Any]] | None,
+                   screen_size: tuple[int, int]) -> dict[str, Any] | None:
+    """
+    规则层（P3）：把「点击 X」这类单步任务直接在界面上定位成 CLICK —— 免模型。
+
+    只做**最安全的一种**：整句就是一个点击目标、且树里**唯一命中**。
+    任何不确定（多命中 / 零命中 / 无 bounds / 非单步 / 坐标越界）一律返回 None，
+    交回模型 —— 宁可多烧一次模型，也不猜。
+
+    :param screen_size: 真实屏幕 (width, height)，用来把元素中心换算成 0-1000。
+    :return: {"action_type": "CLICK", "point": (nx, ny)} 或 None
+    """
+    if not nodes:
+        return None
+    target = parse_click_target(task)
+    if not target:
+        return None
+
+    # 先按 text 找，再按 content-desc 找；合并后必须**唯一命中**
+    hits = find_nodes(nodes, text=target) or find_nodes(nodes, desc=target)
+    if len(hits) != 1:
+        return None
+
+    center = node_center(hits[0])
+    if center is None:
+        return None
+    w, h = screen_size
+    if w <= 0 or h <= 0:
+        return None
+    cx, cy = center
+    nx = round(cx / w * 1000)
+    ny = round(cy / h * 1000)
+    if not (0 <= nx <= 1000 and 0 <= ny <= 1000):
+        return None
+    return {"action_type": "CLICK", "point": (float(nx), float(ny))}

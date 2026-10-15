@@ -73,6 +73,7 @@ class Handle:
         self.history_snapshots: list[list[dict]] = []   # 每次问模型时看到的历史
         self.exec_calls: list[dict] = []        # 真正执行过的动作
         self.report_calls: list[str] = []       # report_need_human 的原因
+        self.tree_texts: list[str] = []         # 每次问模型时带上的界面树（P2）
         self.launch_calls: list[str] = []       # launch_app 的入参
         self.output: str = ""                   # 被吞掉的 stdout（退出后填充，供断言）
 
@@ -86,8 +87,9 @@ def _make_ask(actions: list[dict], h: Handle):
     """按顺序吐动作；每次调用都把「当时看到的历史」快照下来，供断言用。"""
     state = {"n": 0}
 
-    def _ask(client, model, view_img, task, history):
+    def _ask(client, model, view_img, task, history, tree_text="", **kw):
         h.history_snapshots.append([dict(x) for x in history])
+        h.tree_texts.append(tree_text)          # P2：记录每次带没带界面树
         i = state["n"]
         state["n"] += 1
         if i < len(actions):
@@ -167,6 +169,11 @@ def runner_env(actions, *, exec_fn=None, cur_pkg="com.android.settings",
         # 默认「读不到聚焦输入框」（None）—— 让「拦前回读放行」那条路径保持关闭，
         # 需要测它的用例自行 overrides
         "read_focused_text": lambda device=None: None,
+        # P2：默认「树不可用」—— 现有用例的提示词与改造前一致（走截图原路）。
+        # 要测 B 通道的用例用 overrides 覆盖这三个。
+        "dump_nodes": lambda device=None: None,
+        "is_tree_usable": lambda nodes: False,
+        "render_tree_text": lambda nodes, limit=40, max_len=30: "",
         "report_need_human": _report,
         "prune_tmp": lambda *a, **k: None,
         "time": mock.MagicMock(),                 # time.sleep -> 空操作
