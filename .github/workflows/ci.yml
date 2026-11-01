@@ -17,7 +17,7 @@ jobs:
       # ★ 第三方 action 固定到 commit SHA（供应链最佳实践，2026-10-05）：
       #   用 tag（如 @v4）会被上游**静默改写**指向新代码；固定 SHA 才能保证跑的是审计过的版本。
       #   注释里的版本号仅供人工识别，升级时改 SHA 并同步注释。
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
           persist-credentials: false
 
